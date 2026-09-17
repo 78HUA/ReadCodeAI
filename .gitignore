@@ -17,6 +17,9 @@ build/
 *.log
 logs/
 
+# Private notes (interview prep, handoff notes... kept local on purpose)
+notes/
+
 # Local configuration that may hold credentials - never commit
 .env
 application-local.yml

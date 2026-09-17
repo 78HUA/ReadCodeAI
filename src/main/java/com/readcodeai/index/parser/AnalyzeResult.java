@@ -1,6 +1,7 @@
 package com.readcodeai.index.parser;
 
 import com.readcodeai.index.model.CollectedCall;
+import com.readcodeai.index.model.CollectedChunk;
 import com.readcodeai.index.model.CollectedSymbol;
 import com.readcodeai.index.model.CollectedTypeRelation;
 import com.readcodeai.index.model.FileOutcome;
@@ -18,6 +19,7 @@ public record AnalyzeResult(
         List<CollectedSymbol> symbols,
         List<CollectedCall> calls,
         List<CollectedTypeRelation> relations,
+        List<CollectedChunk> chunks,
         long parseMillis,
         long resolveMillis) {
 

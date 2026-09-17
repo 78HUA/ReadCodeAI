@@ -29,6 +29,7 @@ import com.github.javaparser.symbolsolver.resolution.typesolvers.CombinedTypeSol
 import com.github.javaparser.symbolsolver.resolution.typesolvers.JavaParserTypeSolver;
 import com.github.javaparser.symbolsolver.resolution.typesolvers.ReflectionTypeSolver;
 import com.readcodeai.index.model.CollectedCall;
+import com.readcodeai.index.model.CollectedChunk;
 import com.readcodeai.index.model.CollectedSymbol;
 import com.readcodeai.index.model.CollectedTypeRelation;
 import com.readcodeai.index.model.FileOutcome;
@@ -40,9 +41,11 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.StringJoiner;
 
@@ -85,6 +88,8 @@ public class SourceAnalyzer {
     public AnalyzeResult analyze(Path repoRoot, List<Path> javaFiles, int maxFileSizeKb) {
         List<FileOutcome> outcomes = new ArrayList<>();
         List<ParsedFile> parsedFiles = new ArrayList<>();
+        // 文件行文本留一份：生成检索单元时要按行切片，切出来的必须是源文件原文（行号与内容都要能回磁盘核对）
+        Map<String, List<String>> linesByFile = new HashMap<>();
 
         // ---- 解析 ----
         long parseStart = System.nanoTime();
@@ -131,6 +136,7 @@ public class SourceAnalyzer {
             }
             outcomes.add(new FileOutcome(relativePath, sha256(content), loc, true, null));
             parsedFiles.add(new ParsedFile(relativePath, result.getResult().get()));
+            linesByFile.put(relativePath, content.lines().toList());
         }
         long parseMillis = (System.nanoTime() - parseStart) / 1_000_000;
 
@@ -159,7 +165,95 @@ public class SourceAnalyzer {
         }
         long resolveMillis = (System.nanoTime() - resolveStart) / 1_000_000;
 
-        return new AnalyzeResult(outcomes, symbols, calls, relations, parseMillis, resolveMillis);
+        // ---- 生成检索单元（按符号切，不按行切）----
+        List<CollectedChunk> chunks = buildChunks(symbols, parsedFiles, linesByFile);
+
+        return new AnalyzeResult(outcomes, symbols, calls, relations, chunks, parseMillis, resolveMillis);
+    }
+
+    // ------------------------------------------------------------------ 检索单元
+
+    /**
+     * 生成全文检索用的 chunk。
+     *
+     * <p>只给**方法 / 构造器 / 字段**切块，不给类型切块 —— 类型块会把它所有方法再存一遍，
+     * 属于重复内容，只会稀释检索质量。类型的语义由每个文件一份的头部块承担。
+     */
+    private List<CollectedChunk> buildChunks(List<CollectedSymbol> symbols, List<ParsedFile> parsedFiles,
+                                             Map<String, List<String>> linesByFile) {
+        List<CollectedChunk> chunks = new ArrayList<>();
+        for (CollectedSymbol symbol : symbols) {
+            if (isType(symbol.kind())) {
+                continue;
+            }
+            String content = slice(linesByFile.get(symbol.filePath()), symbol.startLine(), symbol.endLine());
+            if (content == null || content.isBlank()) {
+                continue;
+            }
+            chunks.add(new CollectedChunk(symbol.filePath(), CollectedChunk.KIND_SYMBOL,
+                    symbol.qualifiedName(), symbol.startLine(), symbol.endLine(),
+                    sha256(content), content, estimateTokens(content)));
+        }
+
+        for (ParsedFile parsedFile : parsedFiles) {
+            List<String> lines = linesByFile.get(parsedFile.relativePath());
+            if (lines == null || lines.isEmpty()) {
+                continue;
+            }
+            int end = headerEndLine(symbols, parsedFile.relativePath(), lines.size());
+            String content = slice(lines, 1, end);
+            if (content == null || content.isBlank()) {
+                continue;
+            }
+            chunks.add(new CollectedChunk(parsedFile.relativePath(), CollectedChunk.KIND_FILE_HEADER,
+                    null, 1, end, sha256(content), content, estimateTokens(content)));
+        }
+        return chunks;
+    }
+
+    /**
+     * 头部块切到哪一行：**第一个成员的前一行** ——
+     * 这样它正好覆盖「包声明 + import + 类 javadoc + 类声明」，不含方法体。
+     * 没有成员就切到类型声明行。
+     */
+    private static int headerEndLine(List<CollectedSymbol> symbols, String filePath, int fileLines) {
+        int firstMember = Integer.MAX_VALUE;
+        int firstType = Integer.MAX_VALUE;
+        for (CollectedSymbol symbol : symbols) {
+            if (!filePath.equals(symbol.filePath()) || symbol.startLine() <= 0) {
+                continue;
+            }
+            if (isType(symbol.kind())) {
+                firstType = Math.min(firstType, symbol.startLine());
+            } else {
+                firstMember = Math.min(firstMember, symbol.startLine());
+            }
+        }
+        int end = firstMember != Integer.MAX_VALUE ? firstMember - 1
+                : (firstType != Integer.MAX_VALUE ? firstType : 1);
+        return Math.max(1, Math.min(end, fileLines));
+    }
+
+    private static boolean isType(String kind) {
+        return switch (kind) {
+            case "CLASS", "INTERFACE", "ENUM", "RECORD", "ANNOTATION" -> true;
+            default -> false;
+        };
+    }
+
+    /** 按行切片（1-based，闭区间）。切不出来返回 null，由调用方跳过。 */
+    private static String slice(List<String> lines, int startLine, int endLine) {
+        if (lines == null || lines.isEmpty() || startLine < 1) {
+            return null;
+        }
+        int from = Math.max(0, startLine - 1);
+        int to = Math.min(lines.size(), endLine);
+        return from >= to ? null : String.join("\n", lines.subList(from, to));
+    }
+
+    /** 粗估 token。代码里 ASCII 占多数，按 4 字符 ≈ 1 token；只用于上下文预算排序，不做精确计费。 */
+    private static int estimateTokens(String content) {
+        return Math.max(1, content.length() / 4);
     }
 
     // ------------------------------------------------------------------ 阶段一

@@ -76,6 +76,7 @@ public class ProjectIndexer {
             }
             repository.insertCalls(repoId, edgeable, symbolIds);
             repository.insertRelations(repoId, analyzed.relations(), symbolIds);
+            repository.insertChunks(repoId, analyzed.chunks(), fileIds, symbolIds);
 
             int totalLoc = analyzed.files().stream().mapToInt(FileOutcome::loc).sum();
             int resolvedEdges = (int) edgeable.stream().filter(CollectedCall::resolved).count();
@@ -85,7 +86,7 @@ public class ProjectIndexer {
 
             IndexSummary summary = new IndexSummary(repoId, name, root.toString(), commitHash,
                     analyzed.files().size(), (int) analyzed.parsedOkCount(), totalLoc,
-                    analyzed.symbols().size(), edgeable.size(), resolvedEdges, orphan,
+                    analyzed.symbols().size(), edgeable.size(), resolvedEdges, analyzed.chunks().size(), orphan,
                     repository.unresolvedReasonCounts(repoId),
                     analyzed.parseMillis(), analyzed.resolveMillis(), storeMillis,
                     (System.nanoTime() - start) / 1_000_000);

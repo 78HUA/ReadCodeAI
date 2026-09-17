@@ -116,3 +116,30 @@ CREATE TABLE IF NOT EXISTS type_relation
     CONSTRAINT fk_type_super FOREIGN KEY (super_symbol_id) REFERENCES symbol (id) ON DELETE SET NULL
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '类型继承与实现关系';
+
+-- 6. 按符号切分的检索单元（第 2 步：全文检索层）
+--
+-- 关键设计：**按符号切，不按行切**。按固定行数切会把一个方法劈成两半，
+-- 检索到上半段时模型看不到返回逻辑，于是自信地给出错误结论。
+CREATE TABLE IF NOT EXISTS chunk
+(
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+    repo_id        BIGINT      NOT NULL,
+    file_id        BIGINT      NOT NULL,
+    symbol_id      BIGINT      NULL COMMENT 'SYMBOL 类 chunk 指向所属符号；FILE_HEADER/IMPORT_BLOCK 为 NULL',
+    kind           VARCHAR(16) NOT NULL COMMENT 'SYMBOL / FILE_HEADER / IMPORT_BLOCK',
+    start_line     INT         NOT NULL,
+    end_line       INT         NOT NULL,
+    content_hash   CHAR(64)    NOT NULL,
+    content        MEDIUMTEXT  NOT NULL,
+    token_estimate INT         NOT NULL DEFAULT 0 COMMENT '粗估，用于上下文预算',
+    KEY idx_chunk_file (file_id),
+    KEY idx_chunk_symbol (symbol_id),
+    KEY idx_chunk_repo_kind (repo_id, kind),
+    -- 中文注释也要能搜到，所以必须用 ngram 解析器（默认解析器按空格切词，中文会整段失效）
+    FULLTEXT KEY ft_chunk_content (content) WITH PARSER ngram,
+    CONSTRAINT fk_chunk_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE,
+    CONSTRAINT fk_chunk_file FOREIGN KEY (file_id) REFERENCES source_file (id) ON DELETE CASCADE,
+    CONSTRAINT fk_chunk_symbol FOREIGN KEY (symbol_id) REFERENCES symbol (id) ON DELETE SET NULL
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '按符号切分的检索单元';

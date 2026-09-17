@@ -1,6 +1,7 @@
 package com.readcodeai.index.store;
 
 import com.readcodeai.index.model.CollectedCall;
+import com.readcodeai.index.model.CollectedChunk;
 import com.readcodeai.index.model.CollectedSymbol;
 import com.readcodeai.index.model.CollectedTypeRelation;
 import com.readcodeai.index.model.FileOutcome;
@@ -165,8 +166,7 @@ public class IndexRepository {
                 });
     }
 
-    public void insertRelations(long repoId, List<CollectedTypeRelation> relations, Map<String, Long> symbolIds) {
-        jdbc.batchUpdate("""
+    public void insertRelations(long repoId, List<CollectedTypeRelation> relations, Map<String, Long> symbolIds) {        jdbc.batchUpdate("""
                         INSERT INTO `type_relation`
                           (repo_id, sub_symbol_id, super_raw, super_symbol_id, kind, resolved, external)
                         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -188,6 +188,46 @@ public class IndexRepository {
                     ps.setString(5, relation.kind());
                     ps.setBoolean(6, relation.resolved());
                     ps.setBoolean(7, relation.external());
+                });
+    }
+
+    /**
+     * 插入全文检索单元。
+     *
+     * <p>批量大小限制在 200：chunk 的 content 是 MEDIUMTEXT，一次性塞几千条大文本
+     * 容易顶到 max_allowed_packet，分批更稳。
+     */
+    public void insertChunks(long repoId, List<CollectedChunk> chunks,
+                             Map<String, Long> fileIds, Map<String, Long> symbolIds) {
+        if (chunks.isEmpty()) {
+            return;
+        }
+        jdbc.batchUpdate("""
+                        INSERT INTO `chunk`
+                          (repo_id, file_id, symbol_id, kind, start_line, end_line,
+                           content_hash, content, token_estimate)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                chunks, 200, (ps, chunk) -> {
+                    Long fileId = fileIds.get(chunk.filePath());
+                    if (fileId == null) {
+                        throw new IllegalStateException("检索单元找不到所属文件：" + chunk.filePath());
+                    }
+                    ps.setLong(1, repoId);
+                    ps.setLong(2, fileId);
+                    // FILE_HEADER 块不属于任何单个符号，这里为 NULL 是正常的
+                    Long symbolId = chunk.symbolKey() == null ? null : symbolIds.get(chunk.symbolKey());
+                    if (symbolId == null) {
+                        ps.setNull(3, java.sql.Types.BIGINT);
+                    } else {
+                        ps.setLong(3, symbolId);
+                    }
+                    ps.setString(4, chunk.kind());
+                    ps.setInt(5, chunk.startLine());
+                    ps.setInt(6, chunk.endLine());
+                    ps.setString(7, chunk.contentHash());
+                    ps.setString(8, chunk.content());
+                    ps.setInt(9, chunk.tokenEstimate());
                 });
     }
 

@@ -107,27 +107,82 @@
 
 → **出现频率最高的那些仓库内方法，几乎没有被漏掉**。常规召回是好的。
 
-### ❗ 一个确凿的漏报案例（待查，第 1 步收尾前必须弄清楚）
+### ✅ 漏报案例：根因已查清（2026-09-17 当日结案）
 
-`NasRedisConfig#getRedisTemplate/0`（定义在 `NasRedisConfig.java:171`）的 **3 处调用全部未解析**：
+`NasRedisConfig#getRedisTemplate/0`（定义在 `NasRedisConfig.java:171`）的 **3 处调用全部未解析**，
+而同一个接收者字段上的 `enabled/0` 能正常解析。写了一个一次性探针复现，拿到真实的异常栈：
 
 ```
-nasRedisConfig#getRedisTemplate/0        UNSOLVED   ConfigBroadcaster.java:75
-nasRedisConfig#getRedisTemplate/0        UNSOLVED   RedisDistributedLock.java:72, 94
-nasRedisConfig#enabled/0                 已解析      ConfigBroadcaster.java:65, 67   ← 同一个字段！
+--- ConfigBroadcaster.java:65   nasRedisConfig.enabled()
+    OK   declaring=...NasRedisConfig  name=enabled  params=0   returnType=boolean
+--- ConfigBroadcaster.java:75   nasRedisConfig.getRedisTemplate()
+    FAIL com.github.javaparser.resolution.UnsolvedSymbolException: Unsolved symbol : StringRedisTemplate
+         at JavaParserMethodDeclaration.getReturnType(JavaParserMethodDeclaration.java:85)
+         at MethodUsage.<init>(MethodUsage.java:54)
 ```
 
-**同一个接收者字段、同一个类，`enabled()` 能解析而 `getRedisTemplate()` 不能。**
-推测是「方法的返回类型或参数类型落在仓库外（`StringRedisTemplate` 不在我们的类路径上），
-导致求解器解析整个类型的方法表时失败」—— 但这解释不了为什么 `enabled()` 没事，
-所以**这个推测尚未证实，要单独查**。
+**根因**：JavaParser 解析一个方法调用时，会为候选方法构造 `MethodUsage`，
+而 **`MethodUsage` 的构造函数会去求该方法的返回类型**。
+`getRedisTemplate()` 返回 `StringRedisTemplate`，这个类**不在我们的类路径上**
+（我们只有 `spring-boot-starter-jdbc`，没有 spring-data-redis），于是求值抛异常，
+**整个调用点的解析就此失败 —— 哪怕我们需要的信息（哪个类的哪个方法）早就够了**。
+`enabled()` 返回 `boolean`（基本类型永远可解），所以没事。
 
-**可能的修复方向**（按成本排序）：
-1. 给类型求解器加上目标仓库的**依赖 jar**（`JarTypeSolver`）—— 需要解析该仓库的 pom 依赖树，工作量中等
-2. 解析失败时**回退到按「名字 + 参数个数 + 接收者字段类型」的启发式匹配**，并标注置信度
-3. 接受现状并如实说明（但 1204 条 UNSOLVED 里到底藏着多少仓库内调用，必须先量化）
+**旁证**：`ApplicationConfig#getJdbcTemplate/0` 有 12 处调用全部解析成功 ——
+因为它返回的 `JdbcTemplate` 恰好在我们自己的类路径上（依赖 `spring-boot-starter-jdbc`）。
+**同一个机制，两种结果，完全对得上。**
 
-**目前的态度：先量化，再决定要不要修。** 不加区分地"修"会让准确率数字变好看而实际变差。
+**能救回多少（已量化）**：未解析的调用中，有 **178 / 2751** 条的「名字 + 参数个数」能在仓库内找到对应方法。
+但这里面有大量误报（`close/0`、`flush/0`、`setContentType/1` 是外部接口方法，只是名字撞了），
+真正属于本机制、能救回的量级大概在 **几十条**（对应约 **+10%~15%** 的仓库内边）。
+
+**决定：现在不修。** 理由：
+① 修法（给求解器加目标仓库的依赖 jar / 受限启发式回退）成本不小且有引入**假边**的风险 ——
+而对一个主张「证据可核验」的工具，**多一条错边比少一条边更糟**；
+② 第 1 步的判据是「与 IDE Find Usages 比对、差异能解释」，而现在**根因已经能解释了**，
+这本身就是判据要求的东西；
+③ 先让抽查数据说话，再决定值不值得为召回率动手。
+
+**留档的修复方向**（按性价比排序，将来要用直接照做）：
+1. **给类型求解器加目标仓库的依赖 jar**（`JarTypeSolver`）—— 治本，但要解析该仓库的 pom 依赖树
+2. **受限启发式回退**：解析失败且接收者是「本类字段 + 类型唯一指向仓库内某个类」时，
+   按名字 + 参数个数在该类里找唯一匹配，命中则记为 `resolved` 但 `reason='HEURISTIC'`
+   （**必须能和精确解析区分开统计**，否则数字会骗人）
+3. 接受现状并如实说明（当前选择）
+
+---
+
+## 第 1 步（续）：四类确定性查询
+
+**命令**：`mvn -B test`（15 个测试全绿）
+
+| 查询 | 实测输出（节选） |
+|---|---|
+| **定位** | `NasRedisConfig#getRedisTemplate/0` → `NasRedisConfig.java:171-176` |
+| **谁调用了它** | `NasRedisConfig#enabled/0` → 2 处：`ConfigBroadcaster.java:65`、`RedisDistributedLock.java:67` |
+| **它调用了谁** | `ConfigBroadcaster#onLocalChange/1` → 17 条边，每条带 `[已解析]`/`[EXTERNAL]`/`[UNSOLVED]` 标记 |
+| **有哪些实现** | `MusicDataSource`（接口）→ 3 个实现类，各带 `文件:起始行-结束行` |
+
+### ⭐ 最值得记的一条：测试里做了「证据核验」
+
+`SymbolQueryTest` 里有一条断言不是普通单元测试的写法：
+
+> 查出来的符号位置，**去磁盘上把那一行读出来，断言内容里真的含有方法名**。
+
+```java
+String line = Files.readAllLines(Path.of(rootPath).resolve(symbol.filePath())).get(symbol.startLine() - 1);
+assertThat(line).contains("getRedisTemplate");
+```
+
+**这才是这个项目的核心主张** —— 库里的行号不是「声称」，是能被程序核验的。
+把这条做进测试，意味着以后任何让行号与磁盘脱节的改动都会立刻暴露。
+
+### 尚未完成的部分
+
+- [ ] **调用图准确率抽查**：清单已生成（`notes/accuracy-sampling.md`，10 个方法、含我们记录的每个调用点），
+      **待用 IDEA 的 Find Usages 人工核对并填写差异归因** —— 这是第 1 步的正式判据，未完成前第 1 步不算收尾
+- [ ] 十万行级别的解析耗时与内存拐点
+- [ ] 在 Lombok / 非 UTF-8 / 非标准布局仓库上复测
 
 ### 测试素材的取舍（记录一次口径变化）
 

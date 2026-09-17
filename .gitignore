@@ -1,0 +1,23 @@
+# Build output
+target/
+build/
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.ipr
+*.iws
+
+# Tool / session state (agent scratch, not project content)
+.zcode/
+
+# Logs
+*.log
+logs/
+
+# Local configuration that may hold credentials - never commit
+.env
+application-local.yml
+application-local.properties

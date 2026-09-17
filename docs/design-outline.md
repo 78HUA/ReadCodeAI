@@ -602,6 +602,7 @@ readcodeai:
 | **产出** | 第 2 层全文检索（MySQL FULLTEXT + ngram）；`/api/ask` 最简版；**先只在单文件范围内问答**（缩小问题空间，好定位 bug） |
 | **验证** | 拿 10 个真实问题跑，逐条人工判对错；记录 token 与延迟 |
 | **判据** | 10 个问题里正确答案全部带 file+line；答错的能归因（检索没召回 / 模型组织错） |
+| **✅ 实测结果** | 真实调用 glm-4-flash：「登录检查是在哪里做的？」→ 正确结论 + 证据 `LoginCheckFilter.java:1-26`，检索 8 段 / prompt 2607 tokens / **6.4 秒**完成。**跑起来暴露并修掉两个实现 bug**（中文整句切词导致检索 0 段；模型给 `null` 布尔值导致解析失败）。详见 `verification-log.md`。⚠️ 「10 个真实问题逐条人工判定」**尚未做** |
 | **提交信息** | `feat: single-file Q&A with file-and-line evidence` |
 | **估算** | 1–2 天 |
 

@@ -1,0 +1,34 @@
+spring:
+  application:
+    name: readcodeai
+
+server:
+  port: 8080
+
+readcodeai:
+  llm:
+    # 三样都给齐才会启用真实客户端；缺任何一样都降级为 Noop，且不影响静态分析能力
+    enabled: true
+    base-url: ${READCODEAI_LLM_BASE_URL:}
+    # 密钥只从环境变量读，不落配置文件（.gitignore 也已挡住 application-local.*）
+    api-key: ${READCODEAI_LLM_API_KEY:}
+    model: ${READCODEAI_LLM_MODEL:}
+    timeout-seconds: 60
+    # 多跳检索的四维预算：轮次 / 时长 / token / 成本，任一超限即停
+    max-rounds: 3
+    max-duration-ms: 60000
+    max-estimated-tokens: 60000
+    max-estimated-cost: 0.5
+    # 计价参数（元/百万 token），只用于成本估算
+    input-price-per-million: 0
+    output-price-per-million: 0
+  index:
+    max-file-size-kb: 2048
+    exclude-patterns:
+      - "**/target/**"
+      - "**/build/**"
+      - "**/generated/**"
+  retrieve:
+    top-k: 8
+    # 不把整个仓库塞进上下文
+    max-context-tokens: 30000

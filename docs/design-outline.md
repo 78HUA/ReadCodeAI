@@ -724,7 +724,7 @@ readcodeai:
 | JDK | `E:\Java\JDK21`（21.0.12.1）；**Git Bash 里 `JAVA_HOME` 必须写正斜杠**（`export JAVA_HOME=/e/Java/JDK21`），否则 Maven 报「JAVA_HOME 未正确定义」——看着像 JDK 没装，其实是路径格式 |
 | Maven | `E:\ApacheTomcat9\apache-maven-3.8.8`，**无 mvnw wrapper**；本地仓库**不是 `~/.m2`**，是 `...\apache-maven-3.8.8\maven-lib` |
 | MySQL | 服务 `MySQL80` 已运行，端口 3306，`root`/`123456` |
-| Python | **系统级 PATH 里 Anaconda（Python 2.7.3）排在 Python 3.14 之前**，而 Windows 的规则是「系统级 PATH 优先于用户级」→ **cmd / PowerShell 里 `python` 仍是 2.7**；Git Bash 登录窗口已通过 `~/.bashrc` 前置 Python314（`python` = 3.14.7）。**辅助脚本统一用 `python3`** —— 它在任何 shell 下都指向 3.14 |
+| Python | **`python` = `python3` = 3.14.7**，cmd / PowerShell / Git Bash 下一致 —— 2026-09-17 卸载了那个 2013 年的 Anaconda（它把 Python 2.7 占在**系统级** PATH 里，而 Windows 是系统级优先，导致用户级装的 3.x 永远轮不到）；卸载后系统 PATH 里已无任何 Python 目录。**脚本仍统一写 `python3`**，少一种环境差异 |
 | npm | 全局缓存无写权限，`npm install` 会报 EPERM，必须 `--cache <可写目录>`（本项目第一版用不到） |
 | 网络 | `github.com:443` **间歇不可达**（`api.github.com` 稳定）→ git push/clone 必须写成「先直连重试 3 次 → 再挂代理重试」的循环，**别怀疑令牌** |
 | Docker | **没装** —— 不要设计任何依赖 docker-compose 的启动方式 |

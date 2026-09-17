@@ -65,3 +65,72 @@
 - [ ] **配上真实 Key 的链路**：最小对话、延迟、token 用量 —— 见 `design-outline.md` 附录 B 待定项 2，第 2 步之前必须补上
 - [ ] 在 **Lombok / 非 UTF-8 / 非标准布局**的仓库上复测解析成功率（第 1 步）
 - [ ] **十万行级别**的解析耗时与内存拐点（第 1 步，素材用 `E:\Java\JDK21\lib\src.zip`）
+
+---
+
+## 第 1 步：符号表与调用图（2026-09-17）
+
+**命令**：`mvn -B test -Dtest=SymbolIndexIntegrationTest`（前置 `READCODEAI_DB_PASSWORD`）
+**样例仓库**：`E:\GitHub\yunshu-nas` @ `e7195f7`
+
+| 指标 | 实测值 |
+|---|---|
+| 识别到的源码根 | 4 个（多模块 Maven） |
+| Java 文件 | 102（**只扫 `src/main/java`**；第 0 步的 108 是连 `.baseline` 脚本一起数） |
+| 解析成功 | **102 / 102（100%）** |
+| 代码行数 | 9,567 |
+| **符号数** | **967** |
+| **调用边** | **3,263**，其中解析到仓库内符号 **512（15.69%）** |
+| 悬挂边 | **0**（有调用点却没有宿主方法的情况不该出现，为 0 才放心） |
+| 耗时 | 解析 927 ms · 解析调用 5,011 ms · 落库 7,540 ms · **合计 17,093 ms** |
+
+**未解析原因分布**：
+
+| 原因 | 条数 | 含义 |
+|---|---|---|
+| `EXTERNAL` | 1,507 | 确定是仓库外的（框架/JDK），这类本来就该没有边 |
+| `UNSOLVED` | 1,204 | 求解器解不出来 |
+| `ERROR:IllegalStateException` | 40 | 求解器自身抛异常（例如 `String#join/2` 这种 JDK 方法都解不出来） |
+
+### ⚠️ 15.69% 不是「准确率 15.69%」
+
+分母里混了大量**外部调用**（调 Spring / Jackson / JDK），它们本来就不该连到仓库内符号。
+真正该问的是：**仓库内的方法，调用点找全了吗？** 用「同名同参数个数的未解析调用」做了一次粗略探测：
+
+| 仓库内方法 | 解析到的调用点 | 同名未解析调用 |
+|---|---|---|
+| `XmlWriter#writeElement/3` | 53 | **0** |
+| `RestModel#ok/1` | 31 | 1 |
+| `XmlWriter#writeProperty/3` | 26 | 1 |
+| `ApplicationConfig#getSetting/1` | 18 | 0 |
+| `ApplicationConfig#getJdbcTemplate/0` | 12 | 0 |
+
+→ **出现频率最高的那些仓库内方法，几乎没有被漏掉**。常规召回是好的。
+
+### ❗ 一个确凿的漏报案例（待查，第 1 步收尾前必须弄清楚）
+
+`NasRedisConfig#getRedisTemplate/0`（定义在 `NasRedisConfig.java:171`）的 **3 处调用全部未解析**：
+
+```
+nasRedisConfig#getRedisTemplate/0        UNSOLVED   ConfigBroadcaster.java:75
+nasRedisConfig#getRedisTemplate/0        UNSOLVED   RedisDistributedLock.java:72, 94
+nasRedisConfig#enabled/0                 已解析      ConfigBroadcaster.java:65, 67   ← 同一个字段！
+```
+
+**同一个接收者字段、同一个类，`enabled()` 能解析而 `getRedisTemplate()` 不能。**
+推测是「方法的返回类型或参数类型落在仓库外（`StringRedisTemplate` 不在我们的类路径上），
+导致求解器解析整个类型的方法表时失败」—— 但这解释不了为什么 `enabled()` 没事，
+所以**这个推测尚未证实，要单独查**。
+
+**可能的修复方向**（按成本排序）：
+1. 给类型求解器加上目标仓库的**依赖 jar**（`JarTypeSolver`）—— 需要解析该仓库的 pom 依赖树，工作量中等
+2. 解析失败时**回退到按「名字 + 参数个数 + 接收者字段类型」的启发式匹配**，并标注置信度
+3. 接受现状并如实说明（但 1204 条 UNSOLVED 里到底藏着多少仓库内调用，必须先量化）
+
+**目前的态度：先量化，再决定要不要修。** 不加区分地"修"会让准确率数字变好看而实际变差。
+
+### 测试素材的取舍（记录一次口径变化）
+
+第 0 步数出 108 个 Java 文件，第 1 步只有 102 个，**不是回归**：
+第 0 步的验证脚本扫的是整个仓库目录，第 1 步的索引进程只扫识别出来的源码根（`src/main/java`），
+把仓库里 `src/.../.baseline` 下的 5 个独立校验脚本排除在外了 —— 那本来就不是产品代码。

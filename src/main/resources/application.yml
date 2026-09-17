@@ -1,6 +1,15 @@
 spring:
   application:
     name: readcodeai
+  datasource:
+    # 口令只从环境变量读，不进仓库：本机开发用 export READCODEAI_DB_PASSWORD=123456
+    url: jdbc:mysql://${READCODEAI_DB_HOST:127.0.0.1}:${READCODEAI_DB_PORT:3306}/readcodeai?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: ${READCODEAI_DB_USERNAME:root}
+    password: ${READCODEAI_DB_PASSWORD:}
+  sql:
+    init:
+      # schema.sql 全部是 CREATE TABLE IF NOT EXISTS，重复启动安全
+      mode: always
 
 server:
   port: 8080

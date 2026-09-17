@@ -1,0 +1,118 @@
+-- ReadCodeAI 核心表结构（第 1 步：符号表 / 调用边 / 类型关系）
+--
+-- 约定：
+--   * 所有表用 CREATE TABLE IF NOT EXISTS，重复启动安全（由 Spring 的 sql.init 执行，不引 Flyway）
+--   * 主键统一 BIGINT，不用业务键
+--   * 需要索引的字符串列注意长度：utf8mb4 下 InnoDB 单列索引上限 3072 字节 = 768 字符，
+--     所以长文本列（path / qualified_name）用前缀索引，否则建表直接失败
+
+-- 1. 被索引的仓库
+CREATE TABLE IF NOT EXISTS repo
+(
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    name                VARCHAR(128) NOT NULL COMMENT '仓库名，取目录名',
+    root_path           VARCHAR(512) NOT NULL COMMENT '索引时的绝对路径',
+    git_url             VARCHAR(512) NULL,
+    -- 记录索引时的提交号：源码后续变更时能识别出「这份索引基于哪个版本」
+    commit_hash         CHAR(40)     NULL,
+    file_count          INT          NOT NULL DEFAULT 0,
+    parsed_ok_count     INT          NOT NULL DEFAULT 0,
+    total_loc           INT          NOT NULL DEFAULT 0,
+    symbol_count        INT          NOT NULL DEFAULT 0,
+    call_edge_count     INT          NOT NULL DEFAULT 0,
+    call_resolved_count INT          NOT NULL DEFAULT 0,
+    status              VARCHAR(16)  NOT NULL COMMENT 'INDEXING / READY / FAILED',
+    error_msg           TEXT         NULL,
+    indexed_at          DATETIME     NULL,
+    created_at          DATETIME     NOT NULL,
+    -- 同一个路径重复索引 = 覆盖，不做多版本共存
+    UNIQUE KEY uk_repo_root (root_path),
+    KEY idx_repo_status (status)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '被索引的仓库';
+
+-- 2. 源文件清单与解析结果
+CREATE TABLE IF NOT EXISTS source_file
+(
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    repo_id      BIGINT        NOT NULL,
+    path         VARCHAR(1024) NOT NULL COMMENT '相对仓库根的路径，统一用 / 分隔',
+    -- 内容哈希是「行号漂移」的唯一防线：证据核验时必须比对它，而不是盲信库里的行号
+    content_hash CHAR(64)      NOT NULL COMMENT 'SHA-256',
+    loc          INT           NOT NULL DEFAULT 0,
+    parsed_ok    TINYINT       NOT NULL DEFAULT 0,
+    parse_error  TEXT          NULL,
+    indexed_at   DATETIME      NOT NULL,
+    UNIQUE KEY uk_file_repo_path (repo_id, path(255)),
+    KEY idx_file_hash (content_hash),
+    CONSTRAINT fk_file_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '源文件与解析状态';
+
+-- 3. 符号表：类/接口/枚举/记录/方法/构造器/字段
+CREATE TABLE IF NOT EXISTS symbol
+(
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+    repo_id        BIGINT        NOT NULL,
+    file_id        BIGINT        NOT NULL,
+    kind           VARCHAR(16)   NOT NULL COMMENT 'CLASS/INTERFACE/ENUM/RECORD/ANNOTATION/METHOD/CONSTRUCTOR/FIELD',
+    name           VARCHAR(256)  NOT NULL COMMENT '简单名',
+    qualified_name VARCHAR(768)  NOT NULL COMMENT '全仓库唯一的检索键：类型=包名.类名；方法=类型#方法名/参数个数；字段=类型.字段名',
+    signature      VARCHAR(1024) NULL COMMENT '人类可读签名，用于展示与检索',
+    parent_id      BIGINT        NULL COMMENT '所属类型的 symbol.id；顶层类型为 NULL',
+    start_line     INT           NOT NULL,
+    end_line       INT           NOT NULL,
+    modifiers      VARCHAR(128)  NULL,
+    return_type    VARCHAR(256)  NULL,
+    javadoc        TEXT          NULL,
+    KEY idx_symbol_repo_name (repo_id, name),
+    KEY idx_symbol_qname (repo_id, qualified_name(191)),
+    KEY idx_symbol_parent (parent_id),
+    KEY idx_symbol_file (file_id),
+    KEY idx_symbol_kind (repo_id, kind),
+    CONSTRAINT fk_symbol_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE,
+    CONSTRAINT fk_symbol_file FOREIGN KEY (file_id) REFERENCES source_file (id) ON DELETE CASCADE
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '符号表';
+
+-- 4. 调用边：调用者 -> 被调用者
+CREATE TABLE IF NOT EXISTS call_edge
+(
+    id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+    repo_id          BIGINT       NOT NULL,
+    caller_symbol_id BIGINT       NOT NULL,
+    callee_symbol_id BIGINT       NULL COMMENT '解析成功时指向仓库内的符号；解析不出为 NULL',
+    -- 解析不出来时保留原文：这是「诚实记录盲区」的关键 —— 让「没解析出来」与「不存在」严格区分
+    callee_raw       VARCHAR(512) NOT NULL COMMENT '未解析时的调用原文，如 uploadService#uploadMusic/1',
+    call_line        INT          NOT NULL,
+    call_kind        VARCHAR(16)  NOT NULL COMMENT 'METHOD/CONSTRUCTOR/STATIC/SUPER',
+    resolved         TINYINT      NOT NULL DEFAULT 0,
+    reason           VARCHAR(32)  NULL COMMENT 'EXTERNAL/UNSOLVED/DYNAMIC/AMBIGUOUS',
+    KEY idx_edge_caller (caller_symbol_id),
+    KEY idx_edge_callee (callee_symbol_id),
+    KEY idx_edge_repo_resolved (repo_id, resolved),
+    CONSTRAINT fk_edge_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE,
+    CONSTRAINT fk_edge_caller FOREIGN KEY (caller_symbol_id) REFERENCES symbol (id) ON DELETE CASCADE,
+    CONSTRAINT fk_edge_callee FOREIGN KEY (callee_symbol_id) REFERENCES symbol (id) ON DELETE SET NULL
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '调用图';
+
+-- 5. 类型关系：继承 / 实现
+CREATE TABLE IF NOT EXISTS type_relation
+(
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    repo_id         BIGINT       NOT NULL,
+    sub_symbol_id   BIGINT       NOT NULL,
+    super_raw       VARCHAR(512) NOT NULL,
+    super_symbol_id BIGINT       NULL,
+    kind            VARCHAR(16)  NOT NULL COMMENT 'EXTENDS/IMPLEMENTS',
+    resolved        TINYINT      NOT NULL DEFAULT 0,
+    external        TINYINT      NOT NULL DEFAULT 0 COMMENT '父类型不在本仓库内（如框架基类）',
+    KEY idx_type_sub (sub_symbol_id),
+    KEY idx_type_super (super_symbol_id),
+    KEY idx_type_repo_kind (repo_id, kind),
+    CONSTRAINT fk_type_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE,
+    CONSTRAINT fk_type_sub FOREIGN KEY (sub_symbol_id) REFERENCES symbol (id) ON DELETE CASCADE,
+    CONSTRAINT fk_type_super FOREIGN KEY (super_symbol_id) REFERENCES symbol (id) ON DELETE SET NULL
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '类型继承与实现关系';

@@ -37,9 +37,13 @@
             <version>${javaparser.version}</version>
         </dependency>
 
-        <!-- MySQL 驱动。第 0 步只验证它能与 Boot 4.1.1 / JavaParser 共存：
-             这里刻意不引入 spring-boot-starter-jdbc，避免在还没有数据源配置时
-             触发 DataSource 自动配置而启动失败。第 1 步建符号表时才加 starter 与连接配置。 -->
+        <!-- 符号表 / 调用边 / 类型关系都要落库，第 1 步起接入 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+
+        <!-- MySQL 驱动 -->
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>

@@ -376,12 +376,22 @@ com.readcodeai
 | 3 | `symbol` | **符号表**：类/接口/枚举/记录/方法/构造器/字段 | `kind`、`name`、`qualified_name`、`signature`、`parent_id`、`start_line`、`end_line`、`modifiers`、`return_type`、`javadoc`；索引 `(repo_id, name)`、`(repo_id, qualified_name)`、`parent_id` |
 | 4 | `call_edge` | **调用图**：调用者 → 被调用者 | `caller_symbol_id`、`callee_symbol_id`(可空)、`callee_raw`、`call_line`、`call_kind`(METHOD/CONSTRUCTOR/STATIC/SUPER/LAMBDA)、**`resolved`**、`reason`(REFLECTION/DYNAMIC/LOMBOK/EXTERNAL/AMBIGUOUS)；索引 `caller_symbol_id`、`callee_symbol_id`、`(repo_id, resolved)` |
 | 5 | `type_relation` | 继承 / 实现 | `sub_symbol_id`、`super_raw`、`super_symbol_id`(可空)、`kind`(EXTENDS/IMPLEMENTS)、`resolved`、`external`；索引 `sub_symbol_id`、`super_symbol_id` |
-| 6 | `chunk` | 按符号切分的检索单元 | `symbol_id`(可空)、`kind`(SYMBOL/FILE_HEADER/IMPORT_BLOCK)、`start_line`、`end_line`、`content_hash`、`content`、`token_estimate`；`FULLTEXT(content)` with ngram 解析器 |
+| 6 | `chunk` | 按符号切分的检索单元 | `symbol_id`(可空)、`kind`(**SYMBOL / FILE_HEADER**)、`start_line`、`end_line`、`content_hash`、`content`、`token_estimate`；`FULLTEXT(content)` **with ngram 解析器**（否则中文注释搜不到） |
 | 7 | `question` | 自动生成的评估题 | `qtype`(LOCATE/CALLERS/CALLEES/STRUCTURE/IMPLEMENTS/IMPACT)、`payload_json`、**`ground_truth_json`**、`generator_version`、`seed`；索引 `(repo_id, qtype)` |
 | 8 | `answer_log` | 每次问答的流水（质量与成本） | `question_id`(可空)、`mode`(STATIC/AGENT)、`route_json`、`hops`、`prompt_tokens`、`completion_tokens`、`cost`、`latency_ms`、`answer_json`、`refusal`；索引 `(repo_id, created_at)` |
 | 9 | `evidence_check` | 每条证据的校验结果 | `answer_log_id`、`file_path`、`start_line`、`end_line`、`check1_pass`、`check2_pass`、`check3_result`、`mismatch_type`(FILE_NOT_FOUND/LINE_OUT_OF_RANGE/CONTENT_MISMATCH/HASH_DRIFT/OK)、`repaired`、`repair_action`；索引 `answer_log_id` |
 
 **为什么不用图数据库**：调用图查询主要是「直接前驱/后继」和「有限跳数递归」，MySQL 8 的递归 CTE 完全够用，且少一个中间件。
+
+> **⚠️ ngram 全文索引的两条硬约束**（实测得出，见 `verification-log.md`，别踩第二遍）：
+> ① 索引用 ngram 是为了让中文注释可检索，但 ngram 会把标识符切成二元组，
+> 所以**必须用短语检索** `AGAINST('"词"' IN BOOLEAN MODE)` —— 自然语言模式会把 `loginCheck`
+> 放大到 300+ 条噪声，而短语检索与 `LIKE` 人工基准完全一致；
+> ② **含标点的查询必须先切词**（`R.success` 直接检索命中 0），所以切词属于正确性，不是优化。
+>
+> 另：`chunk.kind` 第一版只有 SYMBOL / FILE_HEADER 两种。
+> 设计时还列过 IMPORT_BLOCK，但 import 语句本就在文件头部块里，**单独再存一份纯属重复**，
+> 等真有「按依赖关系找文件」的需求再加。
 
 ### 3.4 关键流程
 

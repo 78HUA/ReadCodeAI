@@ -19,17 +19,17 @@ import java.util.List;
 public class TextSearchRepository {
 
     /**
-     * 短语检索。多个短语之间是「可选」关系（BOOLEAN MODE 默认），按相关度排序。
+     * 短语检索。
      *
-     * <p>调用方负责把用户输入切成短语（见 {@code TextRetriever}）——
-     * 直接用原始输入会把标点带进短语里，导致本可命中的查询漏掉。
+     * @param requireAll true = 每个短语都必须命中（精确，用于短查询）；
+     *                   false = 任一片语命中即可（放宽，用于自然语言长句）
      */
-    public List<ChunkHit> searchPhrases(long repoId, List<String> phrases, int limit) {
+    public List<ChunkHit> searchPhrases(long repoId, List<String> phrases, boolean requireAll, int limit) {
         if (phrases.isEmpty()) {
             return List.of();
         }
         String booleanQuery = phrases.stream()
-                .map(phrase -> "\"" + phrase.replace("\"", "") + "\"")
+                .map(phrase -> (requireAll ? "+" : "") + "\"" + phrase.replace("\"", "") + "\"")
                 .reduce((a, b) -> a + " " + b)
                 .orElseThrow();
 

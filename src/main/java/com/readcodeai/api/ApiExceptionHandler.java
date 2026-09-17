@@ -1,5 +1,6 @@
 package com.readcodeai.api;
 
+import com.readcodeai.agent.LlmUnavailableException;
 import com.readcodeai.retrieve.NotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,6 +25,13 @@ public class ApiExceptionHandler {
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ApiResponse<Void> badRequest(IllegalArgumentException e) {
         return ApiResponse.error(400, e.getMessage());
+    }
+
+    /** LLM 没配 → 503，并在消息里点明「静态分析那几层照常可用」，别让调用方以为整个服务挂了。 */
+    @ExceptionHandler(LlmUnavailableException.class)
+    @ResponseStatus(HttpStatus.SERVICE_UNAVAILABLE)
+    public ApiResponse<Void> llmUnavailable(LlmUnavailableException e) {
+        return ApiResponse.error(503, e.getMessage());
     }
 
     @ExceptionHandler(Exception.class)

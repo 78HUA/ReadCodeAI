@@ -45,37 +45,79 @@ public class TextRetriever {
                     "查询里没有可用于检索的词（至少 " + MIN_TOKEN_LENGTH + " 个字符）");
         }
         long effectiveRepoId = repoId != null ? repoId : symbolQueryService.requireLatestRepoId();
-        return repository.searchPhrases(effectiveRepoId, tokens,
-                Math.min(Math.max(limit, 1), 100));
+        int capped = Math.min(Math.max(limit, 1), 100);
+
+        // 先精确后放宽：短查询（如一个标识符）用「全部词都必须命中」，
+        // 拿不到结果再放宽成「任一词命中」—— 自然语言长句走的是后一条路。
+        List<ChunkHit> precise = repository.searchPhrases(effectiveRepoId, tokens, true, capped);
+        return precise.isEmpty()
+                ? repository.searchPhrases(effectiveRepoId, tokens, false, capped)
+                : precise;
     }
 
     /**
-     * 把查询切成短语：按**非标识符字符**切分（点、井号、空格、括号都是分隔符），
-     * 丢掉过短的词并去重。
+     * 把查询切成检索短语。
      *
-     * <p>于是 {@code R.success} → {@code success}，{@code MusicService#uploadMusic} → {@code MusicService, uploadMusic}。
+     * <p>规则（两条都是被实测逼出来的，别当成可选的优化）：
+     * <ul>
+     *   <li><b>ASCII 标识符整段保留</b>：{@code uploadMusic} 是一个词，切成 upload / Music 会失准</li>
+     *   <li><b>中文按二元组切</b>：中文没有空格，整句会变成一个 token —— 实测
+     *       「登录检查是在哪里做的？」这样切出来是 {@code 登录检查是在哪里做的} 一整串，
+     *       短语检索永远命中不了（0 条结果）。按二元组切开才搜得到，
+     *       而且二元组正是 ngram 索引的粒度，两边对齐。</li>
+     * </ul>
+     *
+     * <p><b>已知局限</b>：这只是「够用的中文切分」，不是真正的分词 ——
+     * 它会把「是在」「哪里」这类虚词也当检索词，靠后面的排序去压。
+     * 真正的语义检索是第 3 层（向量），第一版不做。
      */
     static List<String> tokenize(String query) {
         LinkedHashSet<String> tokens = new LinkedHashSet<>();
-        StringBuilder current = new StringBuilder();
+        StringBuilder ascii = new StringBuilder();
+        StringBuilder cjk = new StringBuilder();
+
         for (int i = 0; i < query.length(); i++) {
             char c = query.charAt(i);
-            if (Character.isLetterOrDigit(c) || c == '_' || c == '$') {
-                current.append(c);
+            if (isCjk(c)) {
+                addAscii(tokens, ascii);
+                cjk.append(c);
+            } else if (c == '_' || c == '$' || Character.isLetterOrDigit(c)) {
+                addCjk(tokens, cjk);
+                ascii.append(c);
             } else {
-                addToken(tokens, current.toString());
-                current.setLength(0);
+                addAscii(tokens, ascii);
+                addCjk(tokens, cjk);
             }
         }
-        addToken(tokens, current.toString());
+        addAscii(tokens, ascii);
+        addCjk(tokens, cjk);
 
         List<String> result = new ArrayList<>(tokens);
         return result.size() <= MAX_TOKENS ? result : result.subList(0, MAX_TOKENS);
     }
 
-    private static void addToken(LinkedHashSet<String> tokens, String token) {
-        if (token.length() >= MIN_TOKEN_LENGTH) {
-            tokens.add(token);
+    /** 汉字（含扩展区）判定。注意 {@code Character.isLetterOrDigit} 对汉字也返回 true，所以必须先判它。 */
+    private static boolean isCjk(char c) {
+        return Character.UnicodeScript.of(c) == Character.UnicodeScript.HAN;
+    }
+
+    private static void addAscii(LinkedHashSet<String> tokens, StringBuilder buffer) {
+        if (buffer.length() >= MIN_TOKEN_LENGTH) {
+            tokens.add(buffer.toString());
+        }
+        buffer.setLength(0);
+    }
+
+    private static void addCjk(LinkedHashSet<String> tokens, StringBuilder buffer) {
+        String run = buffer.toString();
+        buffer.setLength(0);
+        if (run.length() == 1) {
+            tokens.add(run);
+            return;
+        }
+        // 滑动二元组：两个汉字就是中文里最常见的最小语义单位
+        for (int i = 0; i + 2 <= run.length(); i++) {
+            tokens.add(run.substring(i, i + 2));
         }
     }
 }

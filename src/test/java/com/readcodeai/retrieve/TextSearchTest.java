@@ -72,6 +72,25 @@ class TextSearchTest {
     }
 
     @Test
+    void splitsChineseSentencesIntoBigramsOtherwiseNothingCanMatch() {
+        // 回归守卫：中文没有空格，整句若被当成一个 token，短语检索永远命中 0 条 ——
+        // 这个 bug 是问答测试实际跑出来的（问「登录检查是在哪里做的？」检索到 0 段）
+        List<String> tokens = TextRetriever.tokenize("登录检查是在哪里做的？");
+
+        assertThat(tokens)
+                .as("整句必须被切开，否则永远命不中")
+                .doesNotContain("登录检查是在哪里做的")
+                .contains("登录", "检查");
+
+        assumeTrue(!symbolQueryService.repos().isEmpty(), "库里还没索引，跳过");
+        List<ChunkHit> hits = textRetriever.search(null, "登录检查是在哪里做的？", 8);
+        assertThat(hits)
+                .as("自然语言中文问句必须能检索到候选（这是问答的前置条件）")
+                .isNotEmpty();
+        System.out.printf("%n[中文问句检索] \"登录检查是在哪里做的？\" 检索到 %d 段%n", hits.size());
+    }
+
+    @Test
     void findsChineseCommentsBecauseTheIndexUsesTheNgramParser() {
         List<ChunkHit> hits = textRetriever.search(null, "登录", 10);
         assumeTrue(!hits.isEmpty(), "库里还没索引，跳过");

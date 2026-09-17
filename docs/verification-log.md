@@ -213,10 +213,67 @@ EmployeeController.java:34    return employeeService.login(request, employee);  
 **这才是这个项目的核心主张** —— 库里的行号不是「声称」，是能被程序核验的。
 把它做成测试，意味着以后任何让行号与磁盘脱节的改动都会立刻暴露。
 
+### ⭐⭐ 调用图准确率人工抽查（第 1 步的正式判据 · 2026-09-17 完成）
+
+**方法**：用 IDEA 的 Find Usages 作人工基准，抽查 10 个方法（避开 getter/setter）。
+**执行人是项目作者本人** —— 工具的作者不能给自己的准确率下结论。
+逐条比对调用点数量与位置，见 `notes/accuracy-sampling.md`。
+
+| # | 方法 | 我们的记录 | IDEA 实测 | 结论 |
+|---|---|---|---|---|
+| 1 | `R#success/1` | 51 | **62** | ⚠️ 差 11 处 —— **已查清根因，见下** |
+| 2 | `R#error/1` | 30 | 30 | ✅ 一致 |
+| 3 | `OrdersService#acceptOrder/1` | 2 | 2 | ✅ 一致（位置也对得上） |
+| 4 | `OrdersService#completeOrder/1` | 2 | 2 | ✅ 一致 |
+| 5 | `RiderController#save/1` | 1 | 1 | ✅ 一致 |
+| 6 | `LoginCheckFilter#check/2` | 1 | 1 | ✅ 一致 |
+| 7 | `AddressBookService#deleteAddressBook/1` | 1 | 1 | ✅ 一致 |
+| 8 | `AddressBookService#updateAddressBook/1` | 1 | 1 | ✅ 一致 |
+| 9 | `AddressBookService#selectAddressBookList/1` | 1 | 1 | ✅ 一致 |
+| 10 | `CategoryService#saveSortInfo/1` | 1 | 1 | ✅ 一致 |
+
+> **结论：9 / 10 完全一致；唯一差异查到了根因；假边 0 处。**
+
+#### 那 11 处差距是什么 —— **不是漏采集，是没连上**
+
+```
+我们的库：已连边 51 ＋ 未连边 11 ＝ 62 个调用点
+IDEA    ：                          62 个调用点     ← 完全一致
+```
+
+**调用点的采集一处不漏（62 = 62）**；差的是「把调用点连到目标符号」这一步（51/62 = 82.3%）。
+而且**未连上的 11 处没有消失** —— 它们在库里带着 `reason='UNSOLVED'` 完整保留。
+这正是「未解析的调用必须保留原文与原因」这条设计决策的价值：
+**没有它，这里就只能得出「工具漏了 11 处」这个错误结论。**
+
+#### 根因（逐条核对过源码，11 处无一例外）
+
+`R.success(T object)` 是**泛型方法** —— JavaParser 必须求出**实参类型**才能推断类型参数 `T`。
+而这 11 处的实参类型**全部牵连到不在类路径上的外部类**：
+
+| 实参写法 | 实参类型 | 结果 |
+|---|---|---|
+| `R.success(pageInfo)`（7 处） | `Page<Rider>` / `Page<Orders>` —— MyBatis-Plus 外部类 | ❌ 解析失败 |
+| `R.success(addressBookMapper.selectList(qw))` | mapper 是 `BaseMapper` 派生接口，泛型牵连外部类型 | ❌ |
+| `R.success(ordersService.pageOrders(...))` | 返回 `Page<Orders>` | ❌ |
+| `R.success(dishDtoPage)` / `pageDto` / `mealDtoPage` / `stats` | 同上家族 | ❌ |
+| **对照**：`R.success(addressBook)` | `AddressBook`（仓库内类型） | ✅ 解析成功 |
+| **对照**：`R.success("注册成功")` | `String`（JDK 类型） | ✅ 解析成功 |
+
+**与上一节那个漏报案例是同一个病根**：JavaParser 解析调用时要做类型推断/匹配，
+一旦牵涉它解不开的类型（**返回类型或实参类型**），整个调用点就失败 ——
+哪怕「这个调用打到了哪个方法」本身并不需要那个类型。
+
+修复方向与前面留档一致：给类型求解器补上目标仓库的**依赖 jar**（治本），
+或对泛型方法的实参做**容错推断**（解不开就当 `Object`，只用于选方法、不用于判定边的正确性）。
+
+#### 抽查还暴露了生成器的一处瑕疵
+
+清单里「我们找到 **51** 个调用点」那行有多余换行，是生成脚本的 SQL 输出带尾换行所致。
+不影响阅读，下次生成清单时修掉。
+
 ### 尚未完成的部分
 
-- [ ] **调用图准确率人工抽查**（第 1 步的正式判据）：清单已生成
-      （`notes/accuracy-sampling.md`，10 个方法、每个都列出我们记录的调用点），
-      **待用 IDEA 的 Find Usages 核对并填写差异归因**。未完成前第 1 步不算收尾
-- [ ] 十万行级别的解析耗时与内存拐点
+- [ ] 十万行级别的解析耗时与内存拐点（素材用 `E:\Java\JDK21\lib\src.zip`）
 - [ ] 非 UTF-8 编码仓库的解析表现
+- [ ] 中规模语料（3–6 万行）—— 计划用第 3 步的远程拉取功能下载

@@ -27,8 +27,13 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 class ParserToolchainTest {
 
+    /**
+     * 语料路径：默认取项目下的 {@code sample-repos/}（已被 .gitignore 排除），
+     * 或用 {@code -Dreadcodeai.verify.repo=<路径>} 指定。
+     * 这样仓库里不会出现作者本机的目录结构，换语料也不用改代码。
+     */
     private static final Path SAMPLE_REPO = Path.of(
-            System.getProperty("readcodeai.verify.repo", "E:/GitHub/yunshu-nas"));
+            System.getProperty("readcodeai.verify.repo", "sample-repos"));
 
     private static final ParserConfiguration.LanguageLevel LANGUAGE_LEVEL =
             ParserConfiguration.LanguageLevel.JAVA_21;

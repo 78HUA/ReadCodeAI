@@ -20,6 +20,9 @@ logs/
 # Private notes (interview prep, handoff notes... kept local on purpose)
 notes/
 
+# 测试语料（公开仓库不该包含任何本机路径或第三方代码的副本）
+sample-repos/
+
 # Local configuration that may hold credentials - never commit
 .env
 application-local.yml

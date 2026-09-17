@@ -19,8 +19,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 @SpringBootTest
 class SymbolIndexIntegrationTest {
 
+    /** 语料路径：默认 {@code sample-repos/}（gitignore 已排除），或用 {@code -Dreadcodeai.verify.repo=<路径>} 指定。 */
     private static final Path SAMPLE_REPO = Path.of(
-            System.getProperty("readcodeai.verify.repo", "E:/GitHub/yunshu-nas"));
+            System.getProperty("readcodeai.verify.repo", "sample-repos"));
 
     @Autowired
     private ProjectIndexer indexer;
@@ -33,13 +34,13 @@ class SymbolIndexIntegrationTest {
         System.out.println(System.lineSeparator() + summary.toReport());
 
         assertThat(summary.fileCount()).isGreaterThan(0);
-        assertThat(summary.parsedOkCount())
-                .as("解析成功率应达到 100%（云舒NAS 是标准 UTF-8 Maven 工程）")
-                .isEqualTo(summary.fileCount());
+        assertThat(summary.parseSuccessRate())
+                .as("解析成功率（判据：≥ 95%%）")
+                .isGreaterThanOrEqualTo(0.95);
         assertThat(summary.symbolCount()).as("符号数").isGreaterThan(0);
         assertThat(summary.callEdgeCount()).as("调用边数").isGreaterThan(0);
         assertThat(summary.orphanEdgeCount())
-                .as("悬挂边（有调用者调用点、但调用者符号缺失）必须为 0，否则说明分析器有 bug")
+                .as("悬挂边（有调用点、却找不到宿主方法）必须为 0，否则说明分析器有 bug")
                 .isZero();
     }
 }

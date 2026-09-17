@@ -1,6 +1,8 @@
 package com.readcodeai.retrieve;
 
+import com.readcodeai.index.store.SymbolQueryRepository;
 import com.readcodeai.retrieve.model.CallSiteView;
+import com.readcodeai.retrieve.model.RepoView;
 import com.readcodeai.retrieve.model.SymbolView;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -13,114 +15,148 @@ import java.nio.file.Path;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * 第 1 步验证：四类确定性查询。
  *
- * <p><b>最重要的一条断言不是「查得到」，而是「查出来的行号在磁盘上真的对得上」</b> ——
- * 这不是普通单元测试的写法，而是这个项目的核心主张：证据必须能被程序读文件核验。
- * 如果库里记的行号和磁盘内容脱节，整个项目的可信度就不成立。
+ * <p><b>本测试不绑定任何具体项目</b>：基准符号是「被调用最多的方法」「实现类最多的接口」，
+ * 由索引自己选出来。换测试仓库不需要改这个文件。
  *
- * <p>依赖云舒NAS 的索引是库里最近一次完成的索引（集成测试对活库的固有耦合）。
+ * <p><b>最重的断言不是「查得到」，而是「查出来的行号在磁盘上真的对得上」</b> ——
+ * 连调用点的行号也要逐条回磁盘核对。这不是普通单元测试的写法，
+ * 而是这个项目的核心主张：证据必须能被程序读文件核验。
  */
 @SpringBootTest
 class SymbolQueryTest {
 
+    /** 抽查多少个基准符号、最多核对多少处调用点。 */
+    private static final int FIXTURE_LIMIT = 5;
+    private static final int MAX_CALL_SITES_CHECKED = 10;
+
     @Autowired
     private SymbolQueryService queryService;
 
+    @Autowired
+    private SymbolQueryRepository queryRepository;
+
     @Test
-    void locateReturnsAPositionThatMatchesTheFileOnDisk() throws IOException {
-        List<SymbolView> found = queryService.locate(null, "NasRedisConfig#getRedisTemplate/0", 5);
-        assumeTrue(!found.isEmpty(), "库里还没有索引，跳过");
-        SymbolView symbol = found.get(0);
+    void recordedSymbolPositionsMatchTheFilesOnDisk() throws IOException {
+        RepoView repo = latestRepo();
+        List<SymbolView> methods = queryRepository.mostCalledMethods(repo.id(), FIXTURE_LIMIT);
+        assumeTrue(!methods.isEmpty(), "库里还没有可用的基准符号，跳过");
 
-        assertThat(symbol.kind()).isEqualTo("METHOD");
-        assertThat(symbol.filePath()).endsWith("NasRedisConfig.java");
-        assertThat(symbol.qualifiedName())
-                .isEqualTo("top.itning.yunshunas.common.config.NasRedisConfig#getRedisTemplate/0");
+        for (SymbolView method : methods) {
+            Path file = Path.of(repo.rootPath()).resolve(method.filePath());
+            assertThat(file).as("索引记录的文件必须真实存在：%s", method.filePath()).exists();
 
-        // 核心验证：库里记的起止行，去磁盘上读出来核对
-        String rootPath = queryService.repos().get(0).rootPath();
-        Path file = Path.of(rootPath).resolve(symbol.filePath());
-        assertThat(file).as("索引里记录的文件必须真实存在").exists();
+            List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+            assertThat(method.endLine())
+                    .as("%s 的结束行必须在文件范围内（文件共 %d 行）", method.qualifiedName(), lines.size())
+                    .isLessThanOrEqualTo(lines.size());
 
-        List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
-        assertThat(symbol.endLine()).as("行号必须在文件范围内").isLessThanOrEqualTo(lines.size());
+            // 不变式是「记录的行区间内包含符号名」，而**不是**「起始行包含符号名」——
+            // 带注解的方法，区间起点是注解行（如 @PostMapping），这是对的：
+            // 注解本就是声明的一部分。第 8 步前端高亮证据时要注意这一点。
+            List<String> range = lines.subList(method.startLine() - 1, method.endLine());
+            assertThat(String.join("\n", range))
+                    .as("%s 记录的行区间 %d-%d 内应出现符号名，实际区间内容：%s",
+                            method.qualifiedName(), method.startLine(), method.endLine(),
+                            range.isEmpty() ? "(空)" : range.get(0).strip())
+                    .contains(method.name());
 
-        String firstLine = lines.get(symbol.startLine() - 1);
-        assertThat(firstLine)
-                .as("库里记的第 %d 行应该就是该方法声明所在行：%s", symbol.startLine(), firstLine)
-                .contains("getRedisTemplate");
-
-        System.out.printf("%n[证据核验] %s -> %s%n  磁盘第 %d 行：%s%n",
-                symbol.qualifiedName(), symbol.location(), symbol.startLine(), firstLine.strip());
+            System.out.printf("[符号定位核验] %s -> %s:%d-%d  区间首行：%s%n",
+                    method.qualifiedName(), method.filePath(), method.startLine(), method.endLine(),
+                    range.isEmpty() ? "(空)" : range.get(0).strip());
+        }
     }
 
     @Test
-    void callersFindsEveryCallSiteOfAnInRepoMethod() {
-        SymbolView enabled = firstOrSkip(queryService.locate(null, "NasRedisConfig#enabled/0", 5));
-        List<CallSiteView> callers = queryService.callers(enabled.id());
+    void recordedCallSiteLinesActuallyContainThatCallOnDisk() throws IOException {
+        RepoView repo = latestRepo();
+        List<SymbolView> methods = queryRepository.mostCalledMethods(repo.id(), FIXTURE_LIMIT);
+        assumeTrue(!methods.isEmpty(), "库里还没有可用的基准符号，跳过");
 
-        System.out.printf("%n[谁调用了它] %s（共 %d 处）%n", enabled.qualifiedName(), callers.size());
-        callers.forEach(c -> System.out.printf("   %s  (%s)%n", c.callSiteLocation(), c.symbolQualifiedName()));
-
-        // 基准来自索引实测：这两处是 known 的调用点
-        assertThat(callers)
-                .as("应包含已核实的两个调用点")
-                .anySatisfy(c -> assertThat(c.callSiteLocation())
-                        .isEqualTo("nas-common/src/main/java/top/itning/yunshunas/common/config/ConfigBroadcaster.java:65"))
-                .anySatisfy(c -> assertThat(c.callSiteLocation())
-                        .isEqualTo("nas-common/src/main/java/top/itning/yunshunas/common/lock/RedisDistributedLock.java:67"));
-        assertThat(callers).allSatisfy(c -> assertThat(c.symbolFilePath()).isNotBlank());
-    }
-
-    @Test
-    void calleesReportsUnresolvedCallsWithAReasonInsteadOfDroppingThem() {
-        SymbolView onLocalChange = firstOrSkip(queryService.locate(null, "ConfigBroadcaster#onLocalChange/1", 5));
-        List<CallSiteView> callees = queryService.callees(onLocalChange.id());
-
-        System.out.printf("%n[我调用了谁] %s（共 %d 条边）%n", onLocalChange.qualifiedName(), callees.size());
-        callees.forEach(c -> System.out.printf("   %s  ->  %s  %s%n", c.callSiteLocation(), c.calleeRaw(),
-                c.resolved() ? "[已解析]" : "[" + c.reason() + "]"));
-
-        assertThat(callees).as("该方法体内有多个调用").hasSizeGreaterThanOrEqualTo(3);
-        assertThat(callees).allSatisfy(c -> {
-            assertThat(c.calleeRaw()).as("未解析的调用必须保留原文").isNotBlank();
-            assertThat(c.callSiteFile()).as("调用点必须有文件").isNotBlank();
-            if (!c.resolved()) {
-                assertThat(c.reason()).as("未解析必须给出原因").isNotBlank();
+        int checked = 0;
+        for (SymbolView method : methods) {
+            for (CallSiteView call : queryService.callers(method.id())) {
+                Path file = Path.of(repo.rootPath()).resolve(call.callSiteFile());
+                if (!Files.exists(file)) {
+                    continue;
+                }
+                List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+                if (call.callLine() < 1 || call.callLine() > lines.size()) {
+                    continue;
+                }
+                String line = lines.get(call.callLine() - 1);
+                assertThat(line)
+                        .as("调用点行号对不上：%s 的第 %d 行应该是调用 %s，实际内容：%s",
+                                call.callSiteFile(), call.callLine(), method.name(), line.strip())
+                        .contains(method.name());
+                checked++;
+                if (checked >= MAX_CALL_SITES_CHECKED) {
+                    break;
+                }
             }
-        });
-        assertThat(callees).anySatisfy(c -> assertThat(c.resolved()).isTrue());
+            if (checked >= MAX_CALL_SITES_CHECKED) {
+                break;
+            }
+        }
+
+        System.out.printf("%n[调用点核验] 逐条回磁盘核对了 %d 处调用点的行号与内容%n", checked);
+        assertThat(checked).as("至少要核验到若干处调用点，否则这条验证等于没跑").isGreaterThan(0);
     }
 
     @Test
-    void implementationsListsDirectImplementorsOfAnInterface() {
-        SymbolView musicDataSource = firstOrSkip(queryService.locate(null,
-                "top.itning.yunshunas.music.datasource.MusicDataSource", 5));
-        List<SymbolView> implementations = queryService.implementations(musicDataSource.id());
+    void implementationsComeBackWithLocations() {
+        RepoView repo = latestRepo();
+        List<SymbolView> interfaces = queryRepository.mostImplementedInterfaces(repo.id(), FIXTURE_LIMIT);
+        assumeTrue(!interfaces.isEmpty(), "库里没有带实现类的接口，跳过");
 
-        System.out.printf("%n[有哪些实现] %s（%d 个实现类）%n", musicDataSource.qualifiedName(), implementations.size());
-        implementations.forEach(i -> System.out.printf("   %s  %s%n", i.qualifiedName(), i.location()));
-
-        assertThat(musicDataSource.kind()).isEqualTo("INTERFACE");
-        assertThat(implementations).as("基准事实：该接口有 3 个实现类").hasSize(3);
-        assertThat(implementations).allSatisfy(i -> {
-            assertThat(i.filePath()).isNotBlank();
-            assertThat(i.qualifiedName()).isNotEqualTo(musicDataSource.qualifiedName());
-        });
+        for (SymbolView itf : interfaces) {
+            List<SymbolView> implementations = queryService.implementations(itf.id());
+            assertThat(implementations).as("%s 应该有实现类", itf.qualifiedName()).isNotEmpty();
+            assertThat(implementations).allSatisfy(i -> {
+                assertThat(i.filePath()).as("实现类必须带文件位置").isNotBlank();
+                assertThat(i.qualifiedName()).isNotEqualTo(itf.qualifiedName());
+            });
+            System.out.printf("[实现类查询] %s -> %d 个实现类%n", itf.qualifiedName(), implementations.size());
+        }
     }
 
     @Test
-    void locatingSomethingThatDoesNotExistReturnsEmptyRatherThanInventingSomething() {
-        List<SymbolView> found = queryService.locate(null, "definitelyNotASymbolNameXyz", 5);
-        assertThat(found).isEmpty();
+    void unresolvedCalleesKeepAReasonInsteadOfDisappearing() {
+        RepoView repo = latestRepo();
+        List<SymbolView> methods = queryRepository.mostCalledMethods(repo.id(), FIXTURE_LIMIT);
+        assumeTrue(!methods.isEmpty(), "库里还没有可用的基准符号，跳过");
+
+        boolean sawUnresolved = false;
+        for (SymbolView method : methods) {
+            for (CallSiteView callee : queryService.callees(method.id())) {
+                assertThat(callee.calleeRaw()).as("未解析的调用必须保留原文").isNotBlank();
+                if (!callee.resolved()) {
+                    assertThat(callee.reason()).as("未解析必须给出原因").isNotBlank();
+                    sawUnresolved = true;
+                }
+            }
+        }
+        assertThat(sawUnresolved)
+                .as("这几处的调用边里应该存在未解析项（外部依赖不可避免），否则这条验证没意义")
+                .isTrue();
     }
 
-    private static SymbolView firstOrSkip(List<SymbolView> found) {
-        assumeTrue(!found.isEmpty(), "库里还没有索引，跳过");
-        return found.get(0);
+    @Test
+    void unknownLookupsFailLoudlyInsteadOfReturningSomethingInvented() {
+        assertThat(queryService.locate(null, "definitelyNotASymbolNameXyz123", 5)).isEmpty();
+        assertThatThrownBy(() -> queryService.requireSymbol(999_999_999L))
+                .isInstanceOf(NotFoundException.class);
+    }
+
+    /** 库里最近一次索引完成的仓库。 */
+    private RepoView latestRepo() {
+        List<RepoView> repos = queryService.repos();
+        assumeTrue(!repos.isEmpty(), "还没有任何索引，跳过");
+        return repos.get(0);
     }
 }

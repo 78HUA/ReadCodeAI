@@ -91,7 +91,8 @@ public class ProjectIndexer {
                     (System.nanoTime() - start) / 1_000_000);
             log.info("索引完成：{}", summary.toReport().replace(System.lineSeparator(), " | "));
             return summary;
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | LinkageError e) {
+            // 兜底：真出现预料之外的错误时，repo 行必须被标成 FAILED 而不是留在 INDEXING 状态
             repository.failRepo(repoId, e.getClass().getSimpleName() + ": " + e.getMessage());
             throw e;
         }

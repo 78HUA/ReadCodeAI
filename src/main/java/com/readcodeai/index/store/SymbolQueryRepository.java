@@ -24,10 +24,54 @@ public class SymbolQueryRepository {
             s.start_line, s.end_line, s.modifiers, s.return_type, f.path AS file_path
             """;
 
+    /** 抽查基准要避开 getter/setter 这类过于简单的目标，否则测不出问题。 */
+    private static final String TRIVIAL_NAMES = """
+            ('toString','equals','hashCode','main','close','flush','run','apply','accept','compareTo')
+            """;
+
     private final JdbcTemplate jdbc;
 
     public SymbolQueryRepository(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
+    }
+
+    /**
+     * 被调用最多的方法 —— 抽查清单与集成测试都从这里取基准，
+     * 这样测试**不绑定任何具体项目**，换测试仓库不用改代码。
+     */
+    public List<SymbolView> mostCalledMethods(long repoId, int limit) {
+        return jdbc.query("""
+                SELECT %s
+                  FROM `symbol` s
+                  JOIN `source_file` f ON f.id = s.file_id
+                  JOIN (SELECT callee_symbol_id, COUNT(*) AS c
+                          FROM `call_edge`
+                         WHERE repo_id = ? AND resolved = 1
+                         GROUP BY callee_symbol_id) cnt ON cnt.callee_symbol_id = s.id
+                 WHERE s.repo_id = ? AND s.kind = 'METHOD'
+                   AND s.name NOT LIKE 'get%%' AND s.name NOT LIKE 'set%%' AND s.name NOT LIKE 'is%%'
+                   AND s.name NOT IN %s
+                 ORDER BY cnt.c DESC, s.id
+                 LIMIT ?
+                """.formatted(SYMBOL_COLUMNS, TRIVIAL_NAMES),
+                (rs, rowNum) -> toSymbolView(rs), repoId, repoId, limit);
+    }
+
+    /** 实现类最多的接口 —— 同上，给测试与抽查提供不写死的基准。 */
+    public List<SymbolView> mostImplementedInterfaces(long repoId, int limit) {
+        return jdbc.query("""
+                SELECT %s
+                  FROM `symbol` s
+                  JOIN `source_file` f ON f.id = s.file_id
+                  JOIN (SELECT super_symbol_id, COUNT(*) AS c
+                          FROM `type_relation`
+                         WHERE repo_id = ? AND resolved = 1
+                         GROUP BY super_symbol_id) cnt ON cnt.super_symbol_id = s.id
+                 WHERE s.repo_id = ? AND s.kind = 'INTERFACE'
+                 ORDER BY cnt.c DESC, s.id
+                 LIMIT ?
+                """.formatted(SYMBOL_COLUMNS),
+                (rs, rowNum) -> toSymbolView(rs), repoId, repoId, limit);
     }
 
     public List<RepoView> listRepos() {

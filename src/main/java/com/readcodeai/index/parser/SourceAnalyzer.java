@@ -290,6 +290,11 @@ public class SourceAnalyzer {
         } catch (StackOverflowError e) {
             // 深继承 / 递归泛型会让求解器栈溢出；一个调用点不能拖垮整次索引
             return new CollectedCall(raw.callerKey(), null, display, raw.line(), raw.callKind(), false, "SOLVER_OVERFLOW");
+        } catch (LinkageError e) {
+            // 反射解析类路径上的类时，若该类引用了缺失的依赖（如 Jackson 的某个内部类型），
+            // 会抛 NoClassDefFoundError —— 它是 Error 不是 Exception，漏掉它整次索引就断了。
+            // 换用不同语料才暴露出这一点（实测：reggie 外卖项目中触发）。
+            return new CollectedCall(raw.callerKey(), null, display, raw.line(), raw.callKind(), false, "MISSING_CLASS");
         } catch (RuntimeException e) {
             return new CollectedCall(raw.callerKey(), null, display, raw.line(), raw.callKind(), false,
                     "ERROR:" + e.getClass().getSimpleName());
@@ -337,8 +342,9 @@ public class SourceAnalyzer {
                 }
             }
             out.add(new CollectedTypeRelation(typeKey, raw, null, kind, false, true));
-        } catch (RuntimeException | StackOverflowError e) {
-            // 解不出来也可能只是「不在本仓库」（框架基类），统一按外部处理并留痕
+        } catch (RuntimeException | StackOverflowError | LinkageError e) {
+            // 解不出来也可能只是「不在本仓库」（框架基类），统一按外部处理并留痕。
+            // LinkageError 一并接住：反射解析时可能撞到缺失类，同样不该中断整次索引。
             out.add(new CollectedTypeRelation(typeKey, raw, null, kind, false, true));
         }
     }

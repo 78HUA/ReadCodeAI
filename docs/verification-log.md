@@ -81,9 +81,36 @@
 | 配置校验 | ✅ 预算参数为 0 或负数时**启动即失败**（`PropertiesValidationTest`） |
 | 产物 | `target/readcodeai-0.1.0-SNAPSHOT.jar`，约 28.7 MB |
 
+### 验证 3（下半）：配好 Key 的真实链路 · 2026-09-17 补完
+
+**供应商**：智谱（BigModel）的 **OpenAI 兼容端点** `https://open.bigmodel.cn/api/paas/v4`，
+模型 `glm-4-flash`（免费档）—— 当初"不引 AI 框架、只写一个 OpenAI 兼容客户端"的决定在这里直接兑现：
+**换供应商不需要改一行代码，只改环境变量。**
+
+**凭据存放**：`notes/llm-env.sh`（**在 .gitignore 内，永不进仓库**），用 `source` 注入环境变量；
+配置本身走 `READCODEAI_LLM_*` 环境变量，仓库里的配置文件只有占位符。
+
+| 检查项 | 实测 |
+|---|---|
+| 走我们自己客户端的真实调用 | ✅ 日志 `LLM 已启用：model=glm-4-flash`，回复正确，`prompt_tokens=30 / completion_tokens=4` |
+| **冷启动延迟** | **10.8 秒**（含 JVM 启动 + TLS 握手 + 首次请求） |
+| **稳定态延迟**（连测 3 次） | **1.86 s / 1.15 s / 3.58 s** |
+| 真实任务（给一段代码让它描述） | **4.89 秒**，`prompt=59 / completion=45` tokens，描述准确 |
+| 降级路径仍有效 | ✅ 不设环境变量时仍走 Noop（`LlmDegradationTest` 3 条断言） |
+
+**结论**：`timeout-seconds: 60` 的默认值够用（实测最慢不到 11 秒）；
+单次真实问答的 token 量级是**几十到几百**，成本可忽略。
+
+**顺手记两个排查陷阱**（两个都会让人误判成"API 有问题"）：
+
+1. **命令行里传中文 → 被转成 GBK → 接口返回 `JSON parse error: Invalid UTF-8 middle byte`**。
+   看着像 Key 或接口故障，其实是编码问题。**探针命令一律用 ASCII 提问**，
+   或把 JSON 写成 UTF-8 文件再用 `--data-binary @文件`。
+2. **`python3` 是 Windows 原生版，读不了 MSYS 风格的 `/tmp/...` 路径**（报 FileNotFoundError）。
+   要么 `-o` 写相对路径，要么全程用 shell 变量接结果、不落临时文件。
+
 ### 尚未验证的部分（诚实留痕）
 
-- [ ] **配上真实 Key 的链路**：最小对话、延迟、token 用量 —— 见 `design-outline.md` 附录 B 待定项 2，第 2 步之前必须补上
 - [ ] **十万行级别**的解析耗时与内存拐点（素材用 `E:\Java\JDK21\lib\src.zip`，5,108,008 行）
 - [ ] **非 UTF-8 编码**的仓库（现有两套语料都是 UTF-8）
 

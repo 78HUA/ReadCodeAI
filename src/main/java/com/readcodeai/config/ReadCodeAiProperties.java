@@ -219,6 +219,12 @@ public class ReadCodeAiProperties {
         /** 塞进模型的上下文上限，防止把整个仓库灌进去。 */
         private long maxContextTokens = 30_000;
 
+        /**
+         * 同一个文件最多贡献几个代码块。
+         * 没有这个上限，一个到处被引用的热门文件会霸占整个上下文，把真正的答案挤出预算。
+         */
+        private int maxChunksPerFile = 3;
+
         void validate() {
             if (topK <= 0) {
                 throw new IllegalStateException("readcodeai.retrieve.top-k 必须大于 0");
@@ -226,6 +232,17 @@ public class ReadCodeAiProperties {
             if (maxContextTokens <= 0) {
                 throw new IllegalStateException("readcodeai.retrieve.max-context-tokens 必须大于 0");
             }
+            if (maxChunksPerFile <= 0) {
+                throw new IllegalStateException("readcodeai.retrieve.max-chunks-per-file 必须大于 0");
+            }
+        }
+
+        public int getMaxChunksPerFile() {
+            return maxChunksPerFile;
+        }
+
+        public void setMaxChunksPerFile(int maxChunksPerFile) {
+            this.maxChunksPerFile = maxChunksPerFile;
         }
 
         public int getTopK() {

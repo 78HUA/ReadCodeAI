@@ -21,6 +21,7 @@ public record AskAnswer(
         String refusalReason,
         AnsweredBy answeredBy,
         List<String> retrievedFrom,
+        int chunksRetrieved,
         int chunksUsed,
         int promptTokens,
         int completionTokens,
@@ -29,6 +30,6 @@ public record AskAnswer(
     public static AskAnswer refused(String reason, List<String> retrievedFrom,
                                     int chunksUsed, long latencyMs) {
         return new AskAnswer(null, List.of(), true, reason, AnsweredBy.NONE,
-                retrievedFrom, chunksUsed, 0, 0, latencyMs);
+                retrievedFrom, chunksUsed, chunksUsed, 0, 0, latencyMs);
     }
 }

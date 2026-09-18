@@ -43,3 +43,5 @@ readcodeai:
     top-k: 8
     # 不把整个仓库塞进上下文
     max-context-tokens: 30000
+    # 同一个文件最多贡献几个代码块（防止热门文件霸占上下文）
+    max-chunks-per-file: 3

@@ -6,6 +6,7 @@ import com.readcodeai.agent.model.AskAnswer;
 import com.readcodeai.agent.model.AskEvidence;
 import com.readcodeai.config.LlmClient;
 import com.readcodeai.config.ReadCodeAiProperties;
+import com.readcodeai.retrieve.ContextSelector;
 import com.readcodeai.retrieve.QueryRouter;
 import com.readcodeai.retrieve.SymbolQueryService;
 import com.readcodeai.retrieve.TextRetriever;
@@ -39,6 +40,9 @@ public class AnswerService {
 
     private static final Logger log = LoggerFactory.getLogger(AnswerService.class);
 
+    /** 检索候选池 = 最终选用块数 × 这个倍数：先多召回，再让选片按去重/多样性/预算决定留哪些。 */
+    private static final int CANDIDATE_MULTIPLIER = 4;
+
     private static final String SYSTEM_PROMPT = """
             你是代码库理解助手。只能依据下面提供的代码片段回答问题。
 
@@ -55,6 +59,7 @@ public class AnswerService {
     private final TextRetriever textRetriever;
     private final SymbolQueryService symbolQueryService;
     private final QueryRouter queryRouter;
+    private final ContextSelector contextSelector;
     private final LlmClient llmClient;
     private final ReadCodeAiProperties properties;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -62,11 +67,13 @@ public class AnswerService {
     public AnswerService(TextRetriever textRetriever,
                          SymbolQueryService symbolQueryService,
                          QueryRouter queryRouter,
+                         ContextSelector contextSelector,
                          LlmClient llmClient,
                          ReadCodeAiProperties properties) {
         this.textRetriever = textRetriever;
         this.symbolQueryService = symbolQueryService;
         this.queryRouter = queryRouter;
+        this.contextSelector = contextSelector;
         this.llmClient = llmClient;
         this.properties = properties;
     }
@@ -99,26 +106,50 @@ public class AnswerService {
         }
 
         int limit = topK != null && topK > 0 ? topK : properties.getRetrieve().getTopK();
-        List<ChunkHit> hits = textRetriever.search(effectiveRepoId, question, limit);
+        // 先多召回、再由选片决定留哪些：固定只取 8 条时，去重/多样性/预算这些规则根本轮不到生效
+        List<ChunkHit> hits = textRetriever.search(effectiveRepoId, question, limit * CANDIDATE_MULTIPLIER);
         if (scopePath != null && !scopePath.isBlank()) {
             String scope = scopePath.replace('\\', '/');
             hits = hits.stream().filter(hit -> hit.filePath().contains(scope)).toList();
         }
-        List<ChunkHit> selected = withinBudget(hits);
+
+        // 选片：检索回来的块不等于喂给模型的块（去重 / 单文件上限 / 精确名提升 / 预算截断）
+        ContextSelector.Selection selection = contextSelector.select(question, hits,
+                properties.getRetrieve().getMaxContextTokens(), limit,
+                properties.getRetrieve().getMaxChunksPerFile());
+        List<ChunkHit> selected = selection.chunks();
         List<String> retrievedFrom = selected.stream().map(ChunkHit::location).toList();
+        log.info("上下文选片：检索 {} 段 → 采用 {} 段（{} tokens）· 未采用 {} 段",
+                hits.size(), selected.size(), selection.totalTokens(), selection.droppedReasons().size());
+        if (!selection.droppedReasons().isEmpty()) {
+            log.debug("未采用的原因（前 5 条）：{}", selection.droppedReasons().stream().limit(5).toList());
+        }
+
         if (selected.isEmpty()) {
             return AskAnswer.refused("在索引里没有检索到与该问题相关的代码片段",
                     retrievedFrom, 0, elapsedMillis(start));
         }
 
         LlmClient.Completion completion = llmClient.complete(SYSTEM_PROMPT, buildUserPrompt(question, selected));
-        LlmAnswer parsed = parse(completion.content());
+        LlmAnswer parsed;
+        try {
+            parsed = parse(completion.content());
+        } catch (ModelOutputFormatException e) {
+            // 模型输出不是合法 JSON：**不崩，也不假装答出来了** —— 明确归类并拒答。
+            // 这类失败是可以被计数的质量指标（格式错误率），不是异常。
+            log.warn("模型输出格式错误，按拒答处理：{} · 原文前 200 字：{}",
+                    e.getMessage(), abbreviate(e.rawOutput()));
+            return new AskAnswer(null, List.of(), true,
+                    "模型输出不是合法 JSON，本次未能给出带证据的答案：" + e.getMessage(),
+                    AnsweredBy.LLM, retrievedFrom, hits.size(), selected.size(),
+                    completion.promptTokens(), completion.completionTokens(), elapsedMillis(start));
+        }
 
         if (Boolean.TRUE.equals(parsed.refused())) {
             return new AskAnswer(null, List.of(), true,
                     parsed.refusalReason() == null || parsed.refusalReason().isBlank()
                             ? "模型判断给定片段不足以回答" : parsed.refusalReason(),
-                    AnsweredBy.LLM, retrievedFrom, selected.size(),
+                    AnsweredBy.LLM, retrievedFrom, hits.size(), selected.size(),
                     completion.promptTokens(), completion.completionTokens(), elapsedMillis(start));
         }
 
@@ -134,12 +165,12 @@ public class AnswerService {
             log.warn("模型给出了结论却没有可用证据，按拒答处理。结论原文：{}", parsed.answer());
             return new AskAnswer(null, List.of(), true,
                     "模型给出了结论但没有提供可用的 file+line 证据，按设计不予返回",
-                    AnsweredBy.LLM, retrievedFrom, selected.size(),
+                    AnsweredBy.LLM, retrievedFrom, hits.size(), selected.size(),
                     completion.promptTokens(), completion.completionTokens(), elapsedMillis(start));
         }
 
         return new AskAnswer(parsed.answer(), evidence, false, null, AnsweredBy.LLM,
-                retrievedFrom, selected.size(),
+                retrievedFrom, hits.size(), selected.size(),
                 completion.promptTokens(), completion.completionTokens(), elapsedMillis(start));
     }
 
@@ -205,7 +236,7 @@ public class AnswerService {
 
         List<String> origins = evidence.stream().map(AskEvidence::location).toList();
         return new AskAnswer(answer, evidence, false, null, AnsweredBy.STATIC,
-                origins, 0, 0, 0, latencyMs);
+                origins, 0, 0, 0, 0, latencyMs);
     }
 
     /** 丢掉缺文件或缺行号的证据条目 —— 这类条目无法核验，留着只会污染答案。 */
@@ -237,29 +268,40 @@ public class AnswerService {
         return prompt.toString();
     }
 
-    /** 按 token 预算取片段：相关性已由检索排序，这里只做截断，不重排。 */
-    private List<ChunkHit> withinBudget(List<ChunkHit> hits) {
-        long budget = properties.getRetrieve().getMaxContextTokens();
-        List<ChunkHit> selected = new ArrayList<>();
-        long used = 0;
-        for (ChunkHit hit : hits) {
-            if (!selected.isEmpty() && used + hit.tokenEstimate() > budget) {
-                break;
-            }
-            selected.add(hit);
-            used += hit.tokenEstimate();
-        }
-        return selected;
-    }
-
     /**
      * 解析模型的 JSON。
      *
-     * <p>容错但从宽到严：小模型经常把 JSON 包在 Markdown 代码块里，或前后加一句话 ——
-     * 所以先剥壳再取最外层大括号。**但解析不出来就是失败**，不会退回"把原文当答案"，
-     * 那样等于绕过了「必须带证据」这条验收标准。
+     * <p>三层防线，因为**小模型给出的 JSON 经常不合法**（实测踩过：出现 {@code \(} 这种非法转义，
+     * 整道题直接崩掉）：
+     * <ol>
+     *   <li>剥壳：模型爱把 JSON 包在 Markdown 代码块里，或前后加一句话</li>
+     *   <li>修补：把字符串里的**非法转义**修掉（这是实测最常见的一种）</li>
+     *   <li>失败就**明确归类为「模型输出格式错误」并拒答** —— 不崩、也不假装答出来了</li>
+     * </ol>
+     *
+     * <p>**绝不退回"把原文当答案"** —— 那等于绕过「必须带证据」这条验收标准。
      */
-    private LlmAnswer parse(String raw) {
+    private LlmAnswer parse(String raw) throws ModelOutputFormatException {
+        String text = stripFences(raw);
+        int start = text.indexOf('{');
+        int end = text.lastIndexOf('}');
+        if (start < 0 || end <= start) {
+            throw new ModelOutputFormatException("模型没有返回 JSON", raw);
+        }
+        String json = text.substring(start, end + 1);
+        try {
+            return objectMapper.readValue(json, LlmAnswer.class);
+        } catch (Exception first) {
+            try {
+                return objectMapper.readValue(sanitizeJson(json), LlmAnswer.class);
+            } catch (Exception second) {
+                throw new ModelOutputFormatException(
+                        "JSON 不合法（修补后仍失败）：" + second.getMessage(), raw);
+            }
+        }
+    }
+
+    private static String stripFences(String raw) {
         String text = raw == null ? "" : raw.strip();
         if (text.startsWith("```")) {
             int firstNewline = text.indexOf('\n');
@@ -268,29 +310,65 @@ public class AnswerService {
                 text = text.substring(firstNewline + 1, lastFence).strip();
             }
         }
-        int start = text.indexOf('{');
-        int end = text.lastIndexOf('}');
-        if (start < 0 || end <= start) {
-            throw new IllegalStateException("模型没有返回 JSON，无法提取带证据的答案。原文："
-                    + abbreviate(raw));
+        return text;
+    }
+
+    /**
+     * 修掉 JSON 字符串里的非法转义：{@code \(} 这种模型写错的转义，去掉反斜杠、保留字符本身。
+     * 合法的转义（双引号、反斜杠、斜杠、b、f、n、r、t，以及 unicode 形式）原样保留。
+     *
+     * <p>已知局限：引号配对用的是"遇到反斜杠外的引号就切换状态"这种简化判断，
+     * 遇到字符串内的裸引号会判断错 —— 所以它只是**尽力而为的修补**，不是解析器。
+     */
+    static String sanitizeJson(String json) {
+        StringBuilder out = new StringBuilder(json.length());
+        boolean inString = false;
+        for (int i = 0; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (c == '\\' && inString) {
+                char next = i + 1 < json.length() ? json.charAt(i + 1) : 0;
+                boolean legal = next == '"' || next == '\\' || next == '/' || next == 'b'
+                        || next == 'f' || next == 'n' || next == 'r' || next == 't' || next == 'u';
+                if (legal) {
+                    out.append(c);
+                    out.append(next);
+                    i++;
+                }
+                // 非法转义：丢掉反斜杠（连 next 一起在下一轮原样追加）
+                continue;
+            }
+            if (c == '"') {
+                inString = !inString;
+            }
+            out.append(c);
         }
-        try {
-            return objectMapper.readValue(text.substring(start, end + 1), LlmAnswer.class);
-        } catch (Exception e) {
-            throw new IllegalStateException("模型返回的 JSON 无法解析：" + e.getMessage()
-                    + "。原文：" + abbreviate(raw), e);
-        }
+        return out.toString();
+    }
+
+    private static long elapsedMillis(long startNanos) {
+        return (System.nanoTime() - startNanos) / 1_000_000;
     }
 
     private static String abbreviate(String raw) {
         if (raw == null) {
             return "(空)";
         }
-        return raw.length() <= 300 ? raw : raw.substring(0, 300) + "...";
+        return raw.length() <= 200 ? raw : raw.substring(0, 200) + "...";
     }
 
-    private static long elapsedMillis(long startNanos) {
-        return (System.nanoTime() - startNanos) / 1_000_000;
+    /** 模型输出不是合法 JSON。**它是可计数的质量指标，不是崩溃**。 */
+    static class ModelOutputFormatException extends RuntimeException {
+
+        private final transient String rawOutput;
+
+        ModelOutputFormatException(String message, String rawOutput) {
+            super(message);
+            this.rawOutput = rawOutput;
+        }
+
+        String rawOutput() {
+            return rawOutput;
+        }
     }
 
     /**

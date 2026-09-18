@@ -143,3 +143,45 @@ CREATE TABLE IF NOT EXISTS chunk
     CONSTRAINT fk_chunk_symbol FOREIGN KEY (symbol_id) REFERENCES symbol (id) ON DELETE SET NULL
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '按符号切分的检索单元';
+
+-- 7. 自动生成的评估题（第 6 步：分水岭二）
+--
+-- 关键：**ground_truth 来自静态分析，不来自 LLM** ——
+-- 所以不存在「用模型判模型」的循环依赖，这是整套评估可信的前提。
+CREATE TABLE IF NOT EXISTS question
+(
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    repo_id           BIGINT       NOT NULL,
+    qtype             VARCHAR(16)  NOT NULL COMMENT 'LOCATE/CALLERS/CALLEES/STRUCTURE/IMPLEMENTS/IMPACT',
+    question_text     VARCHAR(1024) NOT NULL,
+    payload_json      JSON         NOT NULL COMMENT '题目参数（目标符号等）',
+    -- 标准答案由静态分析算出；判卷时与它比对，不需要人工标注
+    ground_truth_json JSON         NOT NULL,
+    generator_version VARCHAR(32)  NOT NULL COMMENT '生成规则一变就要升版本，否则旧题不可比',
+    seed              BIGINT       NOT NULL COMMENT '固定种子 → 同一 seed 出同一批题，保证可复现',
+    created_at        DATETIME     NOT NULL,
+    KEY idx_question_repo_type (repo_id, qtype),
+    KEY idx_question_seed (repo_id, seed),
+    CONSTRAINT fk_question_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '自动生成的评估题';
+
+-- 8. 每次评估运行的汇总指标
+CREATE TABLE IF NOT EXISTS eval_run
+(
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    repo_id           BIGINT      NOT NULL,
+    seed              BIGINT      NOT NULL,
+    generator_version VARCHAR(32) NOT NULL,
+    mode              VARCHAR(16) NOT NULL COMMENT 'STATIC_ONLY / WITH_LLM',
+    total_questions   INT         NOT NULL,
+    answered          INT         NOT NULL,
+    refused           INT         NOT NULL,
+    failed            INT         NOT NULL,
+    hit_count         INT         NOT NULL COMMENT '精确命中的题数（按题型细分见 metrics_json）',
+    metrics_json      JSON        NOT NULL COMMENT '分题型命中率、证据有效率、平均延迟与 token',
+    ran_at            DATETIME    NOT NULL,
+    KEY idx_eval_repo (repo_id, ran_at),
+    CONSTRAINT fk_eval_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '评估运行汇总';

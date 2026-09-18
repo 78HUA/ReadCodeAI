@@ -31,6 +31,8 @@ public class QueryRouter {
         CALLEES,
         /** 有哪些实现类 */
         IMPLEMENTATIONS,
+        /** 这个类有哪些方法/字段（结构） */
+        STRUCTURE,
         /** 定义/实现在哪 */
         LOCATE,
         /** 模糊语义查找 —— 只有这一类需要向量/模型 */
@@ -55,18 +57,31 @@ public class QueryRouter {
             Pattern.compile("调用了谁|调用了哪些|依赖了哪些|会调用什么|what does .* call", Pattern.CASE_INSENSITIVE));
     private static final List<Pattern> IMPLEMENTATIONS_PATTERNS = List.of(
             Pattern.compile("有哪些实现|实现类|谁实现了|有几个实现|implementations?|implemented by", Pattern.CASE_INSENSITIVE));
+    /** 结构题：问一个类型有哪些成员。注意要排在「定位题」之前判断 —— 「有哪些方法」不是「在哪定义」。 */
+    private static final List<Pattern> STRUCTURE_PATTERNS = List.of(
+            Pattern.compile("有哪些方法|哪些方法|有哪些字段|有哪些成员|有哪些属性|方法列表|字段列表|"
+                    + "what methods|which methods|what fields|members of", Pattern.CASE_INSENSITIVE));
     private static final List<Pattern> LOCATE_PATTERNS = List.of(
             Pattern.compile("在哪定义|定义在哪|在哪个类|在哪实现|在哪里实现|的位置|定义在|where is .* defined",
                     Pattern.CASE_INSENSITIVE));
 
-    /** 从问题里挑出**代码标识符**候选：中文问句里夹着的英文词，通常就是符号名。 */
-    private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]{2,}");
+    /**
+     * 从问题里挑出**代码标识符**候选：中文问句里夹着的英文词，通常就是符号名。
+     *
+     * <p><b>不设长度下限</b>：实测踩过 —— 只允许 3 个字符以上时，
+     * reggie 的核心类 {@code R} 这种**单字符类名**根本提取不出来，问题直接掉进语义检索。
+     * 放宽不会带来噪声，因为候选只是"待查清单"，**最终能不能用取决于符号表里有没有精确同名**。
+     */
+    private static final Pattern IDENTIFIER = Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]*");
 
     /** 这些词是问句里的普通英文，不是符号名，别拿它们去符号表里查。 */
     private static final List<String> STOP_WORDS = List.of(
             "the", "and", "for", "what", "which", "where", "who", "why", "how",
             "call", "calls", "called", "caller", "callers", "method", "methods",
-            "class", "classes", "implementation", "implementations", "defined", "definition");
+            "class", "classes", "implementation", "implementations", "defined", "definition",
+            // 单双字符的英文虚词（放宽长度下限后必须挡住，否则每个问句都会多几个候选）
+            "a", "an", "is", "to", "of", "in", "on", "it", "by", "or", "do", "as",
+            "at", "be", "we", "no", "so", "if", "me", "my", "up", "us");
 
     public Routed route(long repoId, String question, SymbolLookup lookup) {
         Route route = detectRoute(question);
@@ -86,6 +101,9 @@ public class QueryRouter {
         }
         if (matches(question, IMPLEMENTATIONS_PATTERNS)) {
             return Route.IMPLEMENTATIONS;
+        }
+        if (matches(question, STRUCTURE_PATTERNS)) {
+            return Route.STRUCTURE;
         }
         if (matches(question, LOCATE_PATTERNS)) {
             return Route.LOCATE;
@@ -114,15 +132,30 @@ public class QueryRouter {
     /**
      * 把候选标识符换成真实符号。
      *
-     * <p>多条命中时优先取**名字完全一致**的：问「谁调用了 submit」时，
-     * 候选里可能还有提问者随口提到的其它词，精确匹配能把它们筛掉。
+     * <p><b>优先做限定查找</b>：问题里同时出现类型名和方法名时（"XxxService 的 read 方法"），
+     * 先在那个类型里找 —— 否则裸方法名不唯一时只能挑"第一个同名的"，
+     * 那是猜，不是查。**实测：不加这一步，同名方法多的语料上命中率会掉到 0**
+     * （答案指向了另一个同名方法，和真值零重叠）。
      */
     private List<SymbolView> resolveTargets(Route route, List<String> candidates, SymbolLookup lookup) {
+        SymbolView owner = firstExactType(candidates, lookup);
+        if (owner != null) {
+            for (String candidate : candidates) {
+                if (candidate.equals(owner.name())) {
+                    continue;
+                }
+                List<SymbolView> inType = lookup.findInType(owner.qualifiedName(), candidate).stream()
+                        .filter(symbol -> kindMatchesRoute(route, symbol))
+                        .toList();
+                if (!inType.isEmpty()) {
+                    return inType;
+                }
+            }
+        }
         for (String candidate : candidates) {
-            List<SymbolView> found = lookup.find(candidate);
-            List<SymbolView> exact = found.stream()
-                    .filter(s -> s.name().equals(candidate))
-                    .filter(s -> kindMatchesRoute(route, s))
+            List<SymbolView> exact = lookup.find(candidate).stream()
+                    .filter(symbol -> symbol.name().equals(candidate))
+                    .filter(symbol -> kindMatchesRoute(route, symbol))
                     .toList();
             if (!exact.isEmpty()) {
                 return exact;
@@ -131,23 +164,44 @@ public class QueryRouter {
         return List.of();
     }
 
-    private static boolean kindMatchesRoute(Route route, SymbolView symbol) {
-        boolean isType = switch (symbol.kind()) {
+    /** 候选里有没有精确命中某个**类型**的 —— 有的话它就是"限定范围"的线索。 */
+    private static SymbolView firstExactType(List<String> candidates, SymbolLookup lookup) {
+        for (String candidate : candidates) {
+            for (SymbolView symbol : lookup.find(candidate)) {
+                if (symbol.name().equals(candidate) && isType(symbol.kind())) {
+                    return symbol;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean isType(String kind) {
+        return switch (kind) {
             case "CLASS", "INTERFACE", "ENUM", "RECORD", "ANNOTATION" -> true;
             default -> false;
         };
+    }
+
+    private static boolean kindMatchesRoute(Route route, SymbolView symbol) {
+        boolean isType = isType(symbol.kind());
         return switch (route) {
             // 问调用关系问的是「哪个方法」，类型没有调用边
             case CALLERS, CALLEES -> "METHOD".equals(symbol.kind()) || "CONSTRUCTOR".equals(symbol.kind());
-            // 问实现类的目标必须是类型
-            case IMPLEMENTATIONS -> isType;
+            // 问实现类、问成员的目标都必须是类型
+            case IMPLEMENTATIONS, STRUCTURE -> isType;
             default -> true;
         };
     }
 
     /** 查符号的手段由调用方注入，路由本身不碰数据库（便于单测）。 */
-    @FunctionalInterface
     public interface SymbolLookup {
+
         List<SymbolView> find(String name);
+
+        /** 在指定类型里按名字找成员；不支持的实现返回空列表即可。 */
+        default List<SymbolView> findInType(String typeQualifiedName, String name) {
+            return List.of();
+        }
     }
 }

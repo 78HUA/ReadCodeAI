@@ -21,7 +21,7 @@ public class SymbolQueryRepository {
 
     private static final String SYMBOL_COLUMNS = """
             s.id, s.kind, s.name, s.qualified_name, s.signature,
-            s.start_line, s.end_line, s.modifiers, s.return_type, f.path AS file_path
+            s.start_line, s.end_line, s.modifiers, s.return_type, s.parent_id, f.path AS file_path
             """;
 
     /** 抽查基准要避开 getter/setter 这类过于简单的目标，否则测不出问题。 */
@@ -154,6 +154,37 @@ public class SymbolQueryRepository {
         return found.isEmpty() ? java.util.Optional.empty() : java.util.Optional.of(found.get(0));
     }
 
+    /**
+     * 在指定类型里按名字找成员 —— 「XxxService 的 read 方法」这类**限定查找**靠它。
+     *
+     * <p>为什么必须有它：裸方法名往往不唯一（gson 里有一堆 {@code read}），
+     * 不限定在某个类里就只能挑到"第一个同名的"，那是猜不是查。
+     */
+    public List<SymbolView> findMembersInType(long repoId, String typeQualifiedName, String name) {
+        return jdbc.query("""
+                SELECT %s
+                  FROM `symbol` s
+                  JOIN `source_file` f ON f.id = s.file_id
+                  JOIN `symbol` owner ON owner.id = s.parent_id
+                 WHERE s.repo_id = ? AND owner.qualified_name = ? AND s.name = ?
+                 ORDER BY LENGTH(s.qualified_name), s.qualified_name
+                """.formatted(SYMBOL_COLUMNS),
+                (rs, rowNum) -> toSymbolView(rs), repoId, typeQualifiedName, name);
+    }
+
+    /**
+     * 一个类型的直接成员（方法/字段/构造器）—— 结构题（"这个类有哪些方法"）靠它。
+     */
+    public List<SymbolView> children(long parentSymbolId) {
+        return jdbc.query("""
+                SELECT %s
+                  FROM `symbol` s JOIN `source_file` f ON f.id = s.file_id
+                 WHERE s.parent_id = ?
+                 ORDER BY s.kind, s.start_line
+                """.formatted(SYMBOL_COLUMNS),
+                (rs, rowNum) -> toSymbolView(rs), parentSymbolId);
+    }
+
     public SymbolView findSymbolById(long symbolId) {        List<SymbolView> found = jdbc.query("""
                 SELECT %s
                   FROM `symbol` s JOIN `source_file` f ON f.id = s.file_id
@@ -226,6 +257,7 @@ public class SymbolQueryRepository {
                 rs.getLong("id"), rs.getString("kind"), rs.getString("name"),
                 rs.getString("qualified_name"), rs.getString("signature"),
                 rs.getString("file_path"), rs.getInt("start_line"), rs.getInt("end_line"),
-                rs.getString("modifiers"), rs.getString("return_type"));
+                rs.getString("modifiers"), rs.getString("return_type"),
+                rs.getObject("parent_id") == null ? null : rs.getLong("parent_id"));
     }
 }

@@ -14,7 +14,9 @@ public record SymbolView(
         int startLine,
         int endLine,
         String modifiers,
-        String returnType) {
+        String returnType,
+        /** 所属类型的 symbol.id；顶层类型为 null。结构题（"这个类有哪些成员"）要靠它。 */
+        Long parentId) {
 
     /** 人类可读的定位串，例如 {@code a/b/Foo.java:42-58}。 */
     public String location() {

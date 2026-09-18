@@ -107,8 +107,20 @@ public class AnswerService {
 
         // 先路由：**确定性问题根本不叫模型**。「谁调用了 X」的答案是调用图算出来的，
         // 让模型去"组织"它，等于把确定性换成不确定性。
-        QueryRouter.Routed routed = queryRouter.route(effectiveRepoId, question,
-                name -> symbolQueryService.locate(effectiveRepoId, name, 10));
+        QueryRouter.Routed routed = queryRouter.route(effectiveRepoId, question, new QueryRouter.SymbolLookup() {
+            @Override
+            public List<SymbolView> find(String name) {
+                // 上限给到 50：`fromJson` 这种名字在真实仓库里有十几个重载，
+                // 只取 10 个会把目标截断掉（评估集实测抓出来的）
+                return symbolQueryService.locate(effectiveRepoId, name, 50);
+            }
+
+            @Override
+            public List<SymbolView> findInType(String typeQualifiedName, String name) {
+                // 限定查找：问题里同时给了类名和方法名时，靠它把范围锁死（裸方法名往往不唯一）
+                return symbolQueryService.findMembersInType(effectiveRepoId, typeQualifiedName, name);
+            }
+        });
         if (routed.isDeterministic()) {
             log.info("问题走确定性路线：route={} targets={}", routed.route(), routed.targets().size());
             return answerDeterministically(routed, repoRoot, elapsedMillis(start));
@@ -236,11 +248,12 @@ public class AnswerService {
     private AskAnswer answerDeterministically(QueryRouter.Routed routed, Path repoRoot, long latencyMs) {
         List<AskEvidence> evidence = new ArrayList<>();
         SymbolView target = routed.targets().get(0);
-        evidence.add(symbolEvidence(target, target.kind() + " " + target.signature()));
 
         String answer;
         switch (routed.route()) {
             case LOCATE -> {
+                // 定位题的答案**就是**符号的位置，所以目标本身是证据
+                evidence.add(symbolEvidence(target, target.kind() + " " + target.signature()));
                 if (routed.targets().size() > 1) {
                     routed.targets().stream().skip(1).forEach(symbol -> evidence.add(
                             symbolEvidence(symbol, symbol.kind() + " " + symbol.signature())));
@@ -263,12 +276,28 @@ public class AnswerService {
                 List<CallSiteView> callees = symbolQueryService.callees(target.id());
                 var resolved = callees.stream().filter(CallSiteView::resolved).toList();
                 long unresolved = callees.size() - resolved.size();
-                resolved.forEach(call -> evidence.add(new AskEvidence(
-                        call.callSiteFile(), call.callLine(), call.callLine(), "",
-                        "调用了 " + call.calleeRaw())));
+                for (CallSiteView call : resolved) {
+                    // 证据指向**被调用者的定义位置**（而不是调用点）：既更有用（"你调用了它，它在哪"），
+                    // 也让判卷口径与其他题型统一成「位置集合比较」
+                    SymbolView callee = symbolQueryService.requireSymbol(call.symbolId());
+                    evidence.add(symbolEvidence(callee, "被 " + target.name() + " 调用"));
+                }
                 answer = target.qualifiedName() + " 调用了 " + resolved.size() + " 个已解析的目标"
                         + (unresolved > 0
                         ? "，另有 " + unresolved + " 处未解析（外部依赖或静态分析盲区，未计入）" : "");
+            }
+            case STRUCTURE -> {
+                List<SymbolView> members = symbolQueryService.children(target.id());
+                members.forEach(member -> evidence.add(
+                        symbolEvidence(member, member.kind() + " " + member.signature())));
+                if (members.isEmpty()) {
+                    answer = target.qualifiedName() + " 在当前索引里没有任何成员";
+                } else {
+                    String names = members.stream().limit(20).map(SymbolView::name)
+                            .collect(Collectors.joining("、"));
+                    answer = target.qualifiedName() + " 有 " + members.size() + " 个成员："
+                            + names + (members.size() > 20 ? " 等" : "");
+                }
             }
             case IMPLEMENTATIONS -> {
                 List<SymbolView> implementations = symbolQueryService.implementations(target.id());
@@ -279,6 +308,14 @@ public class AnswerService {
                         : target.qualifiedName() + " 有 " + implementations.size() + " 个实现类或子类";
             }
             default -> throw new IllegalStateException("不是确定性路线：" + routed.route());
+        }
+
+        // 集合类题目在结果为空时（例如"没有任何调用点"）也要能指出**你说的是哪个符号** ——
+        // 否则一个空证据列表会让使用者无从判断。**但结果非空时不能把目标塞进去**：
+        // 证据集合就是答案集合，多一个元素就不再等于答案（这个偏差是评估集实测抓出来的）。
+        if (evidence.isEmpty()) {
+            evidence.add(symbolEvidence(target, "题目指向的符号："
+                    + target.kind() + " " + target.signature()));
         }
 
         // 静态路线的证据来自我们自己的索引，同样会漂移（源码改动后行号就失效了）——

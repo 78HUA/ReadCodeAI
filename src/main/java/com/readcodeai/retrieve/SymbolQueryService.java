@@ -73,6 +73,17 @@ public class SymbolQueryService {
         return repository.directImplementations(symbolId);
     }
 
+    /** 一个类型的直接成员（方法/字段/构造器）—— 结构题用它。 */
+    public List<SymbolView> children(long symbolId) {
+        requireSymbol(symbolId);
+        return repository.children(symbolId);
+    }
+
+    /** 在指定类型里按名字找成员（限定查找：解决"裸方法名不唯一"的问题）。 */
+    public List<SymbolView> findMembersInType(long repoId, String typeQualifiedName, String name) {
+        return repository.findMembersInType(repoId, typeQualifiedName, name);
+    }
+
     public long requireLatestRepoId() {
         Long id = repository.latestReadyRepoId();
         if (id == null) {

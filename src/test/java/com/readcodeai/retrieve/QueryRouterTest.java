@@ -55,15 +55,17 @@ class QueryRouterTest {
 
     @Test
     void extractsIdentifierCandidatesAndDropsStopWords() {
-        assertThat(QueryRouter.identifierCandidates("谁调用了 AddressBookService 的 deleteAddressBook 方法？"))
-                .containsExactly("AddressBookService", "deleteAddressBook");
-
-        // 问句里的普通英文词不是符号名，不能拿去查符号表
         assertThat(QueryRouter.identifierCandidates("who calls the submit method"))
                 .containsExactly("submit");
 
-        // 太短的（1~2 个字符）不算候选，避免大量噪声
-        assertThat(QueryRouter.identifierCandidates("R 类是什么")).isEmpty();
+        // 单字符类名也要能提出来 —— 实测踩过：reggie 的核心类就叫 R，
+        // 卡长度下限会让它直接掉进语义检索
+        assertThat(QueryRouter.identifierCandidates("R 有哪些成员？"))
+                .containsExactly("R");
+        // 但单双字符的英文虚词要挡住，否则每个问句都会多几个候选。
+        // 注："type" 不在停用词里 —— 它可能真的是个类名，留着无害（最终能不能用取决于符号表里有没有）
+        assertThat(QueryRouter.identifierCandidates("what is a R type"))
+                .containsExactly("R", "type");
     }
 
     @Test

@@ -169,6 +169,12 @@ public class ReadCodeAiProperties {
         /** 超过这个大小的源文件跳过并记录，不让单个巨型文件拖垮整次索引。 */
         private int maxFileSizeKb = 2048;
 
+        /**
+         * 远程仓库拉取后的存放目录。
+         * 默认放在用户目录下而不是项目目录里 —— 免得把下载的第三方代码混进仓库工作区。
+         */
+        private String workspace = System.getProperty("user.home") + "/.readcodeai/repos";
+
         private java.util.List<String> excludePatterns = new java.util.ArrayList<>(
                 java.util.List.of("**/target/**", "**/build/**", "**/generated/**"));
 
@@ -176,6 +182,17 @@ public class ReadCodeAiProperties {
             if (maxFileSizeKb <= 0) {
                 throw new IllegalStateException("readcodeai.index.max-file-size-kb 必须大于 0");
             }
+            if (workspace == null || workspace.isBlank()) {
+                throw new IllegalStateException("readcodeai.index.workspace 不能为空");
+            }
+        }
+
+        public String getWorkspace() {
+            return workspace;
+        }
+
+        public void setWorkspace(String workspace) {
+            this.workspace = workspace;
         }
 
         public int getMaxFileSizeKb() {

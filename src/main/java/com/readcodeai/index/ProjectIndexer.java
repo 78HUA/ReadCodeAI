@@ -36,20 +36,41 @@ public class ProjectIndexer {
 
     private final IndexRepository repository;
     private final ReadCodeAiProperties properties;
+    private final RepoFetcher repoFetcher;
 
-    public ProjectIndexer(IndexRepository repository, ReadCodeAiProperties properties) {
+    public ProjectIndexer(IndexRepository repository, ReadCodeAiProperties properties, RepoFetcher repoFetcher) {
         this.repository = repository;
         this.properties = properties;
+        this.repoFetcher = repoFetcher;
+    }
+
+    /**
+     * 拉取远程仓库并索引 —— 「贴个链接就能用」的入口。
+     *
+     * <p>拉取与索引是两件事：拉取失败会直接报错（链接错、网络不通），
+     * 而索引失败会由 {@link #index(Path)} 内部把仓库行标成 FAILED。
+     */
+    public IndexSummary indexRemote(String gitUrl) {
+        RepoFetcher.Fetched fetched = repoFetcher.fetch(gitUrl, Path.of(properties.getIndex().getWorkspace()));
+        // 源码包是快照、没有 .git，所以提交号从拉取结果带进来
+        return index(fetched.root(), fetched.commitHash());
     }
 
     public IndexSummary index(Path repoRoot) {
+        return index(repoRoot, null);
+    }
+
+    /**
+     * @param commitHashOverride 远程拉取时带进来的提交号；为 null 时尝试从本地 {@code .git} 读
+     */
+    public IndexSummary index(Path repoRoot, String commitHashOverride) {
         long start = System.nanoTime();
         Path root = repoRoot.toAbsolutePath().normalize();
         if (!Files.isDirectory(root)) {
             throw new IllegalArgumentException("不是目录：" + root);
         }
         String name = root.getFileName() == null ? root.toString() : root.getFileName().toString();
-        String commitHash = readCommitHash(root);
+        String commitHash = commitHashOverride != null ? commitHashOverride : readCommitHash(root);
         long repoId = repository.beginRepo(name, root.toString(), commitHash);
         log.info("开始索引 {}（repoId={}, commit={}）", root, repoId, commitHash);
 

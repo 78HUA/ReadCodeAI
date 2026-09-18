@@ -33,6 +33,8 @@ readcodeai:
     output-price-per-million: 0
   index:
     max-file-size-kb: 2048
+    # 远程仓库拉取后的存放目录（放在用户目录下，免得把下载的第三方代码混进项目工作区）
+    workspace: ${user.home}/.readcodeai/repos
     exclude-patterns:
       - "**/target/**"
       - "**/build/**"

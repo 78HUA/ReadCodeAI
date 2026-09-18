@@ -1,5 +1,6 @@
 package com.readcodeai.agent;
 
+import com.readcodeai.agent.model.AnsweredBy;
 import com.readcodeai.agent.model.AskAnswer;
 import com.readcodeai.agent.model.AskEvidence;
 import com.readcodeai.config.LlmClient;
@@ -43,6 +44,9 @@ class AskServiceTest {
                 answer.completionTokens(), answer.latencyMs());
 
         assertThat(answer.refused()).as("这个问题在 reggie 里是有答案的，不该拒答").isFalse();
+        assertThat(answer.answeredBy())
+                .as("这是模糊语义类问题，应该由模型组织语言")
+                .isEqualTo(AnsweredBy.LLM);
         assertThat(answer.answer()).as("必须给出结论").isNotBlank();
         assertThat(answer.evidence()).as("没有证据的答案不许返回").isNotEmpty();
 

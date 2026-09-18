@@ -1,0 +1,122 @@
+package com.readcodeai.agent;
+
+import com.readcodeai.agent.model.AskAnswer;
+import com.readcodeai.agent.model.AskEvidence;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * 第 2 步验收的**清单生成器**：跑 10 个真实问题，把「结论 + 证据 + 用量」导出成 markdown，
+ * 交给项目作者逐条判定对错（工具的准确率不能由工具自己下结论）。
+ *
+ * <p>输出路径：{@code -Dreadcodeai.qa.report=<路径>}，默认 {@code notes/qa-sampling.md}（在 .gitignore 内）。
+ *
+ * <p>题目是刻意配比的：**3 个确定性问题**（该走调用图/符号表，不该叫模型）、
+ * **6 个模糊语义问题**（该走检索 + 模型）、**1 个仓库里根本不存在的功能**（该拒答）。
+ * 只考答得对不对，看不出「该拒答时有没有拒答」。
+ */
+@SpringBootTest
+class QaSweepTest {
+
+    /** 配比：3 确定性 + 6 语义 + 1 应当拒答。 */
+    private static final List<String> QUESTIONS = List.of(
+            "deleteAddressBook 定义在哪？",
+            "谁调用了 AddressBookService 的 deleteAddressBook 方法？",
+            "AddressBookService 有哪些实现类？",
+            "登录检查是在哪里做的？",
+            "菜品分页查询是怎么实现的？",
+            "新增分类的接口在哪个类里？",
+            "员工登录时密码是怎么校验的？",
+            "哪里做了图片上传？",
+            "这个项目的订单状态是怎么流转的？",
+            "这个项目是怎么对接支付宝支付的？");
+
+    @Autowired
+    private AnswerService answerService;
+
+    @Test
+    void sweepsRealQuestionsAndWritesAWorksheet() throws IOException {
+        Path report = Path.of(System.getProperty("readcodeai.qa.report", "notes/qa-sampling.md"));
+        List<String> lines = new ArrayList<>();
+        lines.add("# 问答效果抽查清单（第 2 步验收）");
+        lines.add("");
+        lines.add("**语料**：reggie 外卖（中性公开代码） · **模型**：智谱 glm-4-flash（免费档）");
+        lines.add("");
+        lines.add("> **怎么用**：逐条看「结论」和「证据」，在每节末尾的**你的判断**里填 对 / 错 / 部分对。");
+        lines.add("> 判错的还要标一下错在哪：**检索没找到** / **模型理解错** / **证据不对**。");
+        lines.add(">");
+        lines.add("> 配比是刻意的：前 3 题是**确定性问题**（该由调用图和符号表直接算，不该叫模型），");
+        lines.add("> 中间 6 题是**模糊语义问题**（该走检索 + 模型），最后 1 题**仓库里根本没有这个功能**（该拒答）。");
+        lines.add("> 只考「答得对不对」看不出「该拒答时有没有拒答」。");
+        lines.add("");
+
+        int answered = 0;
+        int refused = 0;
+        int failed = 0;
+
+        for (int i = 0; i < QUESTIONS.size(); i++) {
+            String question = QUESTIONS.get(i);
+            lines.add("---");
+            lines.add("");
+            lines.add("## Q" + (i + 1) + ". " + question);
+            lines.add("");
+            try {
+                AskAnswer answer = answerService.ask(null, question, null, 8);
+                if (answer.refused()) {
+                    refused++;
+                    lines.add("- **结果**：拒答 —— " + answer.refusalReason());
+                } else {
+                    answered++;
+                    lines.add("- **答案来源**：" + switch (answer.answeredBy()) {
+                        case STATIC -> "**调用图/符号表直接算出（没经过模型）**";
+                        case LLM -> "模型组织（检索 " + answer.chunksUsed() + " 段喂给它）";
+                        case NONE -> "无";
+                    });
+                    lines.add("- **结论**：" + answer.answer());
+                    lines.add("- **证据**：");
+                    for (AskEvidence evidence : answer.evidence()) {
+                        lines.add("  - `" + evidence.location() + "` —— " + evidence.why());
+                    }
+                }
+                lines.add(String.format("- **用量**：prompt=%d · completion=%d · %d ms",
+                        answer.promptTokens(), answer.completionTokens(), answer.latencyMs()));
+            } catch (RuntimeException e) {
+                failed++;
+                lines.add("- **结果**：调用失败 —— " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            }
+            lines.add("");
+            lines.add("- **你的判断**：____（对 / 错 / 部分对）");
+            lines.add("- **若错，错在哪**：____（检索没找到 / 模型理解错 / 证据不对）");
+            lines.add("");
+        }
+
+        lines.add("---");
+        lines.add("");
+        lines.add("## 汇总");
+        lines.add("");
+        lines.add("| 项 | 数量 |");
+        lines.add("|---|---|");
+        lines.add("| 给出答案 | " + answered + " |");
+        lines.add("| 拒答 | " + refused + " |");
+        lines.add("| 调用失败 | " + failed + " |");
+        lines.add("");
+
+        Files.createDirectories(report.getParent());
+        Files.write(report, String.join(System.lineSeparator(), lines).getBytes(StandardCharsets.UTF_8));
+        System.out.printf("%n[问答抽查] 10 个问题跑完：给出答案 %d · 拒答 %d · 失败 %d%n  清单已写入 %s%n",
+                answered, refused, failed, report.toAbsolutePath());
+
+        // 作为测试，它只保证「全部题目都能跑完」；答得对不对由人来判
+        assertThat(failed).as("有题目跑失败了，说明还有未处理的异常路径").isZero();
+    }
+}

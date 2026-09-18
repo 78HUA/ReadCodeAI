@@ -1,13 +1,17 @@
 package com.readcodeai.agent;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.readcodeai.agent.model.AnsweredBy;
 import com.readcodeai.agent.model.AskAnswer;
 import com.readcodeai.agent.model.AskEvidence;
 import com.readcodeai.config.LlmClient;
 import com.readcodeai.config.ReadCodeAiProperties;
+import com.readcodeai.retrieve.QueryRouter;
 import com.readcodeai.retrieve.SymbolQueryService;
 import com.readcodeai.retrieve.TextRetriever;
+import com.readcodeai.retrieve.model.CallSiteView;
 import com.readcodeai.retrieve.model.ChunkHit;
+import com.readcodeai.retrieve.model.SymbolView;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -50,16 +54,19 @@ public class AnswerService {
 
     private final TextRetriever textRetriever;
     private final SymbolQueryService symbolQueryService;
+    private final QueryRouter queryRouter;
     private final LlmClient llmClient;
     private final ReadCodeAiProperties properties;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public AnswerService(TextRetriever textRetriever,
                          SymbolQueryService symbolQueryService,
+                         QueryRouter queryRouter,
                          LlmClient llmClient,
                          ReadCodeAiProperties properties) {
         this.textRetriever = textRetriever;
         this.symbolQueryService = symbolQueryService;
+        this.queryRouter = queryRouter;
         this.llmClient = llmClient;
         this.properties = properties;
     }
@@ -73,14 +80,25 @@ public class AnswerService {
         if (question == null || question.isBlank()) {
             throw new IllegalArgumentException("问题不能为空");
         }
-        if (!llmClient.available()) {
-            throw new LlmUnavailableException("未配置 LLM（readcodeai.llm.*），问答不可用；"
-                    + "静态分析类接口（定位 / 调用关系 / 实现类 / 全文检索）不受影响");
-        }
 
         long effectiveRepoId = repoId != null ? repoId : symbolQueryService.requireLatestRepoId();
-        int limit = topK != null && topK > 0 ? topK : properties.getRetrieve().getTopK();
 
+        // 先路由：**确定性问题根本不叫模型**。「谁调用了 X」的答案是调用图算出来的，
+        // 让模型去"组织"它，等于把确定性换成不确定性。
+        QueryRouter.Routed routed = queryRouter.route(effectiveRepoId, question,
+                name -> symbolQueryService.locate(effectiveRepoId, name, 10));
+        if (routed.isDeterministic()) {
+            log.info("问题走确定性路线：route={} targets={}", routed.route(), routed.targets().size());
+            return answerDeterministically(routed, elapsedMillis(start));
+        }
+
+        // 走到这里才需要模型；没配就按降级处理（静态分析那几层照常可用）
+        if (!llmClient.available()) {
+            throw new LlmUnavailableException("未配置 LLM（readcodeai.llm.*），语义问答不可用；"
+                    + "定位 / 调用关系 / 实现类 / 全文检索等确定性能力不受影响");
+        }
+
+        int limit = topK != null && topK > 0 ? topK : properties.getRetrieve().getTopK();
         List<ChunkHit> hits = textRetriever.search(effectiveRepoId, question, limit);
         if (scopePath != null && !scopePath.isBlank()) {
             String scope = scopePath.replace('\\', '/');
@@ -100,7 +118,7 @@ public class AnswerService {
             return new AskAnswer(null, List.of(), true,
                     parsed.refusalReason() == null || parsed.refusalReason().isBlank()
                             ? "模型判断给定片段不足以回答" : parsed.refusalReason(),
-                    retrievedFrom, selected.size(),
+                    AnsweredBy.LLM, retrievedFrom, selected.size(),
                     completion.promptTokens(), completion.completionTokens(), elapsedMillis(start));
         }
 
@@ -116,12 +134,78 @@ public class AnswerService {
             log.warn("模型给出了结论却没有可用证据，按拒答处理。结论原文：{}", parsed.answer());
             return new AskAnswer(null, List.of(), true,
                     "模型给出了结论但没有提供可用的 file+line 证据，按设计不予返回",
-                    retrievedFrom, selected.size(),
+                    AnsweredBy.LLM, retrievedFrom, selected.size(),
                     completion.promptTokens(), completion.completionTokens(), elapsedMillis(start));
         }
 
-        return new AskAnswer(parsed.answer(), evidence, false, null, retrievedFrom, selected.size(),
+        return new AskAnswer(parsed.answer(), evidence, false, null, AnsweredBy.LLM,
+                retrievedFrom, selected.size(),
                 completion.promptTokens(), completion.completionTokens(), elapsedMillis(start));
+    }
+
+    /**
+     * 确定性路线的回答：**答案直接由查询结果生成，不过模型**。
+     *
+     * <p>所以它更快、更省、也**在没配 LLM 时照样可用** —— 这正是「可降级」设计想要的样子：
+     * 剥掉模型之后，工具仍然是个能用的工具，而不是一个空壳。
+     *
+     * <p>证据里**第一条永远是目标符号自身**：即使「没有任何地方调用它」，
+     * 也要能指出「你说的是这个符号」，否则一个空证据列表会让使用者无从判断。
+     */
+    private AskAnswer answerDeterministically(QueryRouter.Routed routed, long latencyMs) {
+        List<AskEvidence> evidence = new ArrayList<>();
+        SymbolView target = routed.targets().get(0);
+        evidence.add(new AskEvidence(target.filePath(), target.startLine(), target.endLine(),
+                target.kind() + " " + target.signature()));
+
+        String answer;
+        switch (routed.route()) {
+            case LOCATE -> {
+                if (routed.targets().size() > 1) {
+                    routed.targets().stream().skip(1).forEach(symbol -> evidence.add(
+                            new AskEvidence(symbol.filePath(), symbol.startLine(), symbol.endLine(),
+                                    symbol.kind() + " " + symbol.signature())));
+                }
+                answer = "共找到 " + routed.targets().size() + " 个同名符号，第一个是 " + target.location();
+            }
+            case CALLERS -> {
+                List<CallSiteView> callers = symbolQueryService.callers(target.id());
+                var resolvedCallers = callers.stream()
+                        .filter(c -> c.symbolId() != null)
+                        .toList();
+                resolvedCallers.forEach(call -> evidence.add(new AskEvidence(
+                        call.callSiteFile(), call.callLine(), call.callLine(),
+                        "被 " + call.symbolQualifiedName() + " 调用")));
+                answer = resolvedCallers.isEmpty()
+                        ? target.qualifiedName() + " 在当前索引里没有任何调用点（可能是入口方法，也可能是死代码）"
+                        : target.qualifiedName() + " 共有 " + resolvedCallers.size() + " 处调用";
+            }
+            case CALLEES -> {
+                List<CallSiteView> callees = symbolQueryService.callees(target.id());
+                var resolved = callees.stream().filter(CallSiteView::resolved).toList();
+                long unresolved = callees.size() - resolved.size();
+                resolved.forEach(call -> evidence.add(new AskEvidence(
+                        call.callSiteFile(), call.callLine(), call.callLine(),
+                        "调用了 " + call.calleeRaw())));
+                answer = target.qualifiedName() + " 调用了 " + resolved.size() + " 个已解析的目标"
+                        + (unresolved > 0
+                        ? "，另有 " + unresolved + " 处未解析（外部依赖或静态分析盲区，未计入）" : "");
+            }
+            case IMPLEMENTATIONS -> {
+                List<SymbolView> implementations = symbolQueryService.implementations(target.id());
+                implementations.forEach(impl -> evidence.add(new AskEvidence(
+                        impl.filePath(), impl.startLine(), impl.endLine(),
+                        "实现了 " + target.name() + " 的 " + impl.kind())));
+                answer = implementations.isEmpty()
+                        ? target.qualifiedName() + " 在当前索引里没有任何实现类或子类"
+                        : target.qualifiedName() + " 有 " + implementations.size() + " 个实现类或子类";
+            }
+            default -> throw new IllegalStateException("不是确定性路线：" + routed.route());
+        }
+
+        List<String> origins = evidence.stream().map(AskEvidence::location).toList();
+        return new AskAnswer(answer, evidence, false, null, AnsweredBy.STATIC,
+                origins, 0, 0, 0, latencyMs);
     }
 
     /** 丢掉缺文件或缺行号的证据条目 —— 这类条目无法核验，留着只会污染答案。 */

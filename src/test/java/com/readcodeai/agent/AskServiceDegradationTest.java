@@ -26,7 +26,7 @@ class AskServiceDegradationTest {
     void refusesToAnswerWhenNoLlmIsConfiguredAndSaysWhatStillWorks() {
         assertThatThrownBy(() -> answerService.ask(null, "登录检查在哪做的", null, 5))
                 .isInstanceOf(LlmUnavailableException.class)
-                .hasMessageContaining("问答不可用")
-                .hasMessageContaining("静态分析类接口");
+                .hasMessageContaining("语义问答不可用")
+                .hasMessageContaining("确定性能力不受影响");
     }
 }

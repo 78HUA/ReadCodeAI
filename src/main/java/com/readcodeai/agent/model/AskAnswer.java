@@ -11,8 +11,9 @@ import java.util.List;
  * <p>{@code retrievedFrom} 是「这次答案建立在哪些检索结果上」——
  * 答案错了要能分清是**检索没召回**还是**模型组织错了**，没有这个字段就查不了。
  *
- * <p>注意：本阶段的证据只做**结构约束**（必须有、必须带 file+line），
- * **内容核验**（真去读文件比对行号与片段）是第 4 步的事。
+ * <p>{@code verification} 是**真读磁盘核验**的结果（第 4 步的分水岭）：
+ * 文件存不存在、行号有没有越界、模型引的片段与磁盘内容对不对得上。
+ * {@code STATIC} 路线的答案由查询结果直接生成，不需要再做一遍证据核验。
  */
 public record AskAnswer(
         String answer,
@@ -25,11 +26,12 @@ public record AskAnswer(
         int chunksUsed,
         int promptTokens,
         int completionTokens,
-        long latencyMs) {
+        long latencyMs,
+        VerificationSummary verification) {
 
     public static AskAnswer refused(String reason, List<String> retrievedFrom,
                                     int chunksUsed, long latencyMs) {
         return new AskAnswer(null, List.of(), true, reason, AnsweredBy.NONE,
-                retrievedFrom, chunksUsed, chunksUsed, 0, 0, latencyMs);
+                retrievedFrom, chunksUsed, chunksUsed, 0, 0, latencyMs, VerificationSummary.none());
     }
 }

@@ -137,8 +137,24 @@ public class SymbolQueryRepository {
                 repoId, keyword, "%" + keyword + "%", keyword, keyword, limit);
     }
 
-    public SymbolView findSymbolById(long symbolId) {
-        List<SymbolView> found = jdbc.query("""
+    /** 按 id 取仓库 —— 证据校验需要仓库根路径，才能把「相对路径」还原成磁盘上的真实文件。 */
+    public java.util.Optional<RepoView> findRepoById(long repoId) {
+        List<RepoView> found = jdbc.query("""
+                SELECT id, name, root_path, commit_hash, file_count, parsed_ok_count, total_loc,
+                       symbol_count, call_edge_count, call_resolved_count, status, indexed_at
+                  FROM `repo`
+                 WHERE id = ?
+                """, (rs, rowNum) -> new RepoView(
+                rs.getLong("id"), rs.getString("name"), rs.getString("root_path"),
+                rs.getString("commit_hash"), rs.getInt("file_count"), rs.getInt("parsed_ok_count"),
+                rs.getInt("total_loc"), rs.getInt("symbol_count"), rs.getInt("call_edge_count"),
+                rs.getInt("call_resolved_count"), rs.getString("status"),
+                rs.getTimestamp("indexed_at") == null ? null : rs.getTimestamp("indexed_at").toLocalDateTime()),
+                repoId);
+        return found.isEmpty() ? java.util.Optional.empty() : java.util.Optional.of(found.get(0));
+    }
+
+    public SymbolView findSymbolById(long symbolId) {        List<SymbolView> found = jdbc.query("""
                 SELECT %s
                   FROM `symbol` s JOIN `source_file` f ON f.id = s.file_id
                  WHERE s.id = ?

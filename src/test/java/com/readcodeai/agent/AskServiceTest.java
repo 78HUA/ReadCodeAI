@@ -52,13 +52,34 @@ class AskServiceTest {
         System.out.printf("  检索到 %d 段 · 模型 %s · prompt=%d completion=%d · %d ms%n",
                 answer.chunksUsed(), llmClient.model(), answer.promptTokens(),
                 answer.completionTokens(), answer.latencyMs());
+        System.out.printf("  证据校验：通过 %d 条 · 拦下 %d 条 · 定向修正 %d 处%n",
+                answer.verification().verified(), answer.verification().mismatch(),
+                answer.verification().repairs().size());
 
-        assertThat(answer.refused()).as("这个问题在语料里是有答案的，不该拒答").isFalse();
-        assertThat(answer.answeredBy())
-                .as("这是模糊语义类问题，应该由模型组织语言")
-                .isEqualTo(AnsweredBy.LLM);
+        // 第 4 步的分水岭：**返回给使用者的每一条证据都必须真的通过过磁盘核验**。
+        // 注意这里断言的是「不变式」而不是「一定答出来了」——
+        // 模型会随机地把证据引到错误的文件/行号上，那时**拒答才是正确行为**。
+        // 真正要守住的是：**只要返回了答案，里面就不许有未通过核验的证据。**
+        if (answer.refused()) {
+            assertThat(answer.refusalReason())
+                    .as("拒答的理由必须说清是「证据没过核验」还是「片段不足以回答」")
+                    .satisfiesAnyOf(
+                            reason -> assertThat(reason).contains("核验"),
+                            reason -> assertThat(reason).contains("不足以回答"),
+                            reason -> assertThat(reason).contains("合法 JSON"));
+            System.out.println("  本次拒答（模型给的证据没过核验或片段不足），也是正确行为");
+            return;
+        }
+
+        assertThat(answer.answeredBy()).isEqualTo(AnsweredBy.LLM);
         assertThat(answer.answer()).as("必须给出结论").isNotBlank();
         assertThat(answer.evidence()).as("没有证据的答案不许返回").isNotEmpty();
+        assertThat(answer.verification().verified())
+                .as("通过核验的证据数应等于返回的证据数")
+                .isEqualTo(answer.evidence().size());
+        assertThat(answer.verification().allVerified())
+                .as("返回的答案里不该混入未通过核验的证据")
+                .isTrue();
 
         // 防幻觉的第一道闸门：模型引用的文件必须来自本次检索结果，不能凭空出现
         for (AskEvidence evidence : answer.evidence()) {

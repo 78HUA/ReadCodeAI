@@ -32,6 +32,12 @@ public class SymbolQueryService {
         return repository.findByRootPath(rootPath);
     }
 
+    /** 按 id 取仓库；找不到就报错 —— 证据校验要靠它的根路径把相对路径还原成磁盘文件。 */
+    public RepoView requireRepo(long repoId) {
+        return repository.findRepoById(repoId)
+                .orElseThrow(() -> new NotFoundException("仓库不存在：id=" + repoId));
+    }
+
     /** {@code repoId} 为 null 时用最近一次索引完成的仓库。找不到任何仓库时报错，不静默返回空。 */
     public List<SymbolView> locate(Long repoId, String keyword, int limit) {
         if (keyword == null || keyword.isBlank()) {

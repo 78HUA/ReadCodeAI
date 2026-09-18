@@ -97,6 +97,28 @@ public class SymbolQueryRepository {
     }
 
     /**
+     * 按仓库根路径查 —— 「最近索引的仓库」是个会变的全局状态，
+     * 测试与自动化脚本必须能指名道姓地锁定自己要的那个语料，不能依赖它。
+     */
+    public java.util.Optional<RepoView> findByRootPath(String rootPath) {
+        List<RepoView> found = jdbc.query("""
+                SELECT id, name, root_path, commit_hash, file_count, parsed_ok_count, total_loc,
+                       symbol_count, call_edge_count, call_resolved_count, status, indexed_at
+                  FROM `repo`
+                 WHERE root_path = ?
+                 ORDER BY id DESC
+                 LIMIT 1
+                """, (rs, rowNum) -> new RepoView(
+                rs.getLong("id"), rs.getString("name"), rs.getString("root_path"),
+                rs.getString("commit_hash"), rs.getInt("file_count"), rs.getInt("parsed_ok_count"),
+                rs.getInt("total_loc"), rs.getInt("symbol_count"), rs.getInt("call_edge_count"),
+                rs.getInt("call_resolved_count"), rs.getString("status"),
+                rs.getTimestamp("indexed_at") == null ? null : rs.getTimestamp("indexed_at").toLocalDateTime()),
+                rootPath);
+        return found.isEmpty() ? java.util.Optional.empty() : java.util.Optional.of(found.get(0));
+    }
+
+    /**
      * 定位：按简单名或限定名找符号。排序把「精确匹配」排在前面 ——
      * 用户搜 {@code upload} 时，叫 upload 的方法应该比 {@code uploadMusic} 先出现。
      */

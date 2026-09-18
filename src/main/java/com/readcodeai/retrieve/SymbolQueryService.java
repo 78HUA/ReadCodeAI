@@ -27,6 +27,11 @@ public class SymbolQueryService {
         return repository.listRepos();
     }
 
+    /** 按仓库根路径锁定一个语料（测试与脚本用；别依赖「最近索引的仓库」那个会变的状态）。 */
+    public java.util.Optional<RepoView> findByRootPath(String rootPath) {
+        return repository.findByRootPath(rootPath);
+    }
+
     /** {@code repoId} 为 null 时用最近一次索引完成的仓库。找不到任何仓库时报错，不静默返回空。 */
     public List<SymbolView> locate(Long repoId, String keyword, int limit) {
         if (keyword == null || keyword.isBlank()) {

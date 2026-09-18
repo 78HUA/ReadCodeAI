@@ -1,9 +1,11 @@
 package com.readcodeai.retrieve;
 
+import com.readcodeai.index.ProjectIndexer;
 import com.readcodeai.index.store.SymbolQueryRepository;
 import com.readcodeai.retrieve.model.CallSiteView;
 import com.readcodeai.retrieve.model.RepoView;
 import com.readcodeai.retrieve.model.SymbolView;
+import com.readcodeai.verify.TestCorpus;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -25,13 +27,14 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * 由索引自己选出来。换测试仓库不需要改这个文件。
  *
  * <p><b>最重的断言不是「查得到」，而是「查出来的行号在磁盘上真的对得上」</b> ——
- * 连调用点的行号也要逐条回磁盘核对。这不是普通单元测试的写法，
- * 而是这个项目的核心主张：证据必须能被程序读文件核验。
+ * 连调用点的行号也要逐条回磁盘核对。
+ *
+ * <p>语料由 {@code -Dreadcodeai.verify.repo} 指定并**显式锁定 repoId** ——
+ * 不能依赖「最近索引的仓库」，那个全局状态会被别的测试（比如远程拉取）改变。
  */
 @SpringBootTest
 class SymbolQueryTest {
 
-    /** 抽查多少个基准符号、最多核对多少处调用点。 */
     private static final int FIXTURE_LIMIT = 5;
     private static final int MAX_CALL_SITES_CHECKED = 10;
 
@@ -41,9 +44,12 @@ class SymbolQueryTest {
     @Autowired
     private SymbolQueryRepository queryRepository;
 
+    @Autowired
+    private ProjectIndexer indexer;
+
     @Test
     void recordedSymbolPositionsMatchTheFilesOnDisk() throws IOException {
-        RepoView repo = latestRepo();
+        RepoView repo = corpus();
         List<SymbolView> methods = queryRepository.mostCalledMethods(repo.id(), FIXTURE_LIMIT);
         assumeTrue(!methods.isEmpty(), "库里还没有可用的基准符号，跳过");
 
@@ -57,13 +63,11 @@ class SymbolQueryTest {
                     .isLessThanOrEqualTo(lines.size());
 
             // 不变式是「记录的行区间内包含符号名」，而**不是**「起始行包含符号名」——
-            // 带注解的方法，区间起点是注解行（如 @PostMapping），这是对的：
-            // 注解本就是声明的一部分。第 8 步前端高亮证据时要注意这一点。
+            // 带注解的方法，区间起点是注解行（如 @PostMapping），这是对的：注解本就是声明的一部分
             List<String> range = lines.subList(method.startLine() - 1, method.endLine());
             assertThat(String.join("\n", range))
-                    .as("%s 记录的行区间 %d-%d 内应出现符号名，实际区间内容：%s",
-                            method.qualifiedName(), method.startLine(), method.endLine(),
-                            range.isEmpty() ? "(空)" : range.get(0).strip())
+                    .as("%s 记录的行区间 %d-%d 内应出现符号名", method.qualifiedName(),
+                            method.startLine(), method.endLine())
                     .contains(method.name());
 
             System.out.printf("[符号定位核验] %s -> %s:%d-%d  区间首行：%s%n",
@@ -74,7 +78,7 @@ class SymbolQueryTest {
 
     @Test
     void recordedCallSiteLinesActuallyContainThatCallOnDisk() throws IOException {
-        RepoView repo = latestRepo();
+        RepoView repo = corpus();
         List<SymbolView> methods = queryRepository.mostCalledMethods(repo.id(), FIXTURE_LIMIT);
         assumeTrue(!methods.isEmpty(), "库里还没有可用的基准符号，跳过");
 
@@ -110,7 +114,7 @@ class SymbolQueryTest {
 
     @Test
     void implementationsComeBackWithLocations() {
-        RepoView repo = latestRepo();
+        RepoView repo = corpus();
         List<SymbolView> interfaces = queryRepository.mostImplementedInterfaces(repo.id(), FIXTURE_LIMIT);
         assumeTrue(!interfaces.isEmpty(), "库里没有带实现类的接口，跳过");
 
@@ -127,7 +131,7 @@ class SymbolQueryTest {
 
     @Test
     void unresolvedCalleesKeepAReasonInsteadOfDisappearing() {
-        RepoView repo = latestRepo();
+        RepoView repo = corpus();
         List<SymbolView> methods = queryRepository.mostCalledMethods(repo.id(), FIXTURE_LIMIT);
         assumeTrue(!methods.isEmpty(), "库里还没有可用的基准符号，跳过");
 
@@ -142,21 +146,22 @@ class SymbolQueryTest {
             }
         }
         assertThat(sawUnresolved)
-                .as("这几处的调用边里应该存在未解析项（外部依赖不可避免），否则这条验证没意义")
+                .as("这几个方法的调用边里应该存在未解析项（外部依赖不可避免），否则这条验证没意义")
                 .isTrue();
     }
 
     @Test
     void unknownLookupsFailLoudlyInsteadOfReturningSomethingInvented() {
-        assertThat(queryService.locate(null, "definitelyNotASymbolNameXyz123", 5)).isEmpty();
+        RepoView repo = corpus();
+        assertThat(queryService.locate(repo.id(), "definitelyNotASymbolNameXyz123", 5)).isEmpty();
         assertThatThrownBy(() -> queryService.requireSymbol(999_999_999L))
                 .isInstanceOf(NotFoundException.class);
     }
 
-    /** 库里最近一次索引完成的仓库。 */
-    private RepoView latestRepo() {
-        List<RepoView> repos = queryService.repos();
-        assumeTrue(!repos.isEmpty(), "还没有任何索引，跳过");
-        return repos.get(0);
+    /** 锁定本次要测的语料（不能依赖「最近索引的仓库」）。 */
+    private RepoView corpus() {
+        var resolved = TestCorpus.resolve(indexer, queryService);
+        assumeTrue(resolved.isPresent(), "语料 " + TestCorpus.SAMPLE + " 不存在，跳过");
+        return resolved.get();
     }
 }

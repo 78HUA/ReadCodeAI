@@ -1,7 +1,9 @@
 package com.readcodeai.retrieve;
 
+import com.readcodeai.index.ProjectIndexer;
 import com.readcodeai.retrieve.model.ChunkHit;
 import com.readcodeai.retrieve.model.RepoView;
+import com.readcodeai.verify.TestCorpus;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -21,8 +23,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  *
  * <p>两个重点：
  * ① **切词是正确性的一部分** —— 含标点的查询（{@code R.success}）不切词就一条都搜不到；
- * ② **命中的 chunk 内容必须与磁盘上那段行区间逐字一致** —— 检索结果将来要当证据用，
- *    内容与行号对不上就等于证据是假的。
+ *    中文整句不切词同样搜不到（这条是问答测试实际跑出来的）。
+ * ② **命中的 chunk 内容必须与磁盘上那段行区间逐字一致** —— 检索结果将来要当证据用。
+ *
+ * <p>语料由 {@code -Dreadcodeai.verify.repo} 指定并**显式锁定 repoId**。
  */
 @SpringBootTest
 class TextSearchTest {
@@ -33,11 +37,14 @@ class TextSearchTest {
     @Autowired
     private SymbolQueryService symbolQueryService;
 
+    @Autowired
+    private ProjectIndexer indexer;
+
     @Test
     void findsChunksByIdentifierAndTheChunkContentMatchesTheFileOnDisk() throws IOException {
-        RepoView repo = latestRepo();
-        List<ChunkHit> hits = textRetriever.search(null, "loginCheck", 10);
-        assumeTrue(!hits.isEmpty(), "库里还没索引，跳过");
+        RepoView repo = corpus();
+        List<ChunkHit> hits = textRetriever.search(repo.id(), "loginCheck", 10);
+        assumeTrue(!hits.isEmpty(), "语料里没有这个标识符，跳过");
 
         System.out.printf("%n[全文检索] \"loginCheck\" 命中 %d 条：%n", hits.size());
         hits.forEach(h -> System.out.printf("   %s  (%s, score=%.2f)%n", h.location(), h.kind(), h.score()));
@@ -51,7 +58,8 @@ class TextSearchTest {
             // 核心断言：chunk 里的内容，必须与磁盘上这一段行区间完全一致
             String fromDisk = String.join("\n", lines.subList(hit.startLine() - 1, hit.endLine()));
             assertThat(hit.content())
-                    .as("%s 的 chunk 内容与磁盘上的第 %d-%d 行不一致", hit.filePath(), hit.startLine(), hit.endLine())
+                    .as("%s 的 chunk 内容与磁盘上的第 %d-%d 行不一致",
+                            hit.filePath(), hit.startLine(), hit.endLine())
                     .isEqualTo(fromDisk);
         }
     }
@@ -65,10 +73,6 @@ class TextSearchTest {
         assertThat(TextRetriever.tokenize("查询 订单 列表")).containsExactly("查询", "订单", "列表");
         // 单字符被丢掉：太短，检索价值低且会带来大量噪声
         assertThat(TextRetriever.tokenize("R a b")).isEmpty();
-
-        List<ChunkHit> hits = textRetriever.search(null, "R.success", 5);
-        assumeTrue(!hits.isEmpty(), "库里还没索引，跳过");
-        assertThat(hits).as("切词后应该能命中（这正是切词存在的理由）").isNotEmpty();
     }
 
     @Test
@@ -82,8 +86,8 @@ class TextSearchTest {
                 .doesNotContain("登录检查是在哪里做的")
                 .contains("登录", "检查");
 
-        assumeTrue(!symbolQueryService.repos().isEmpty(), "库里还没索引，跳过");
-        List<ChunkHit> hits = textRetriever.search(null, "登录检查是在哪里做的？", 8);
+        RepoView repo = corpus();
+        List<ChunkHit> hits = textRetriever.search(repo.id(), "登录检查是在哪里做的？", 8);
         assertThat(hits)
                 .as("自然语言中文问句必须能检索到候选（这是问答的前置条件）")
                 .isNotEmpty();
@@ -92,8 +96,9 @@ class TextSearchTest {
 
     @Test
     void findsChineseCommentsBecauseTheIndexUsesTheNgramParser() {
-        List<ChunkHit> hits = textRetriever.search(null, "登录", 10);
-        assumeTrue(!hits.isEmpty(), "库里还没索引，跳过");
+        RepoView repo = corpus();
+        List<ChunkHit> hits = textRetriever.search(repo.id(), "登录", 10);
+        assumeTrue(!hits.isEmpty(), "语料里没有这个中文词，跳过");
 
         System.out.printf("%n[中文检索] \"登录\" 命中 %d 条：%n", hits.size());
         hits.stream().limit(3).forEach(h -> System.out.printf("   %s%n", h.location()));
@@ -104,23 +109,24 @@ class TextSearchTest {
 
     @Test
     void returnsEmptyForSomethingThatIsNotThereInsteadOfInventingHits() {
-        assumeTrue(!symbolQueryService.repos().isEmpty(), "库里还没索引，跳过");
-        assertThat(textRetriever.search(null, "zzzNotPresentIdentifierXyz", 10)).isEmpty();
+        RepoView repo = corpus();
+        assertThat(textRetriever.search(repo.id(), "zzzNotPresentIdentifierXyz", 10)).isEmpty();
     }
 
     @Test
     void rejectsQueriesWithoutUsableTokens() {
-        assertThatThrownBy(() -> textRetriever.search(null, "   ", 10))
+        assertThatThrownBy(() -> textRetriever.search(1L, "   ", 10))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("不能为空");
-        assertThatThrownBy(() -> textRetriever.search(null, "a", 10))
+        assertThatThrownBy(() -> textRetriever.search(1L, "a", 10))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("没有可用于检索的词");
     }
 
-    private RepoView latestRepo() {
-        List<RepoView> repos = symbolQueryService.repos();
-        assumeTrue(!repos.isEmpty(), "还没有任何索引，跳过");
-        return repos.get(0);
+    /** 锁定本次要测的语料（不能依赖「最近索引的仓库」）。 */
+    private RepoView corpus() {
+        var resolved = TestCorpus.resolve(indexer, symbolQueryService);
+        assumeTrue(resolved.isPresent(), "语料 " + TestCorpus.SAMPLE + " 不存在，跳过");
+        return resolved.get();
     }
 }

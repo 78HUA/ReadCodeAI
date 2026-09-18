@@ -3,11 +3,15 @@ package com.readcodeai.agent;
 import com.readcodeai.agent.model.AnsweredBy;
 import com.readcodeai.agent.model.AskAnswer;
 import com.readcodeai.index.ProjectIndexer;
+import com.readcodeai.index.store.SymbolQueryRepository;
 import com.readcodeai.retrieve.SymbolQueryService;
+import com.readcodeai.retrieve.model.SymbolView;
 import com.readcodeai.verify.TestCorpus;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -41,10 +45,15 @@ class DeterministicAnswerTest {
     @Autowired
     private SymbolQueryService queryService;
 
+    @Autowired
+    private SymbolQueryRepository repository;
+
     @Test
     void answersCallersQuestionWithoutAnyLlm() {
-        AskAnswer answer = answerService.ask(corpusRepoId(),
-                "谁调用了 AddressBookService 的 deleteAddressBook 方法？", null, 5);
+        long repoId = corpusRepoId();
+        SymbolView target = firstWithCallers(repoId);
+        AskAnswer answer = answerService.ask(repoId,
+                "谁调用了 " + target.qualifiedName() + "？", null, 5);
 
         System.out.printf("%n[确定性回答·无模型] %s%n  answeredBy=%s%n  证据：%n",
                 answer.answer(), answer.answeredBy());
@@ -60,7 +69,11 @@ class DeterministicAnswerTest {
 
     @Test
     void answersImplementationsQuestionWithoutAnyLlm() {
-        AskAnswer answer = answerService.ask(corpusRepoId(), "AddressBookService 有哪些实现类？", null, 5);
+        long repoId = corpusRepoId();
+        List<SymbolView> interfaces = repository.mostImplementedInterfaces(repoId, 1);
+        assumeTrue(!interfaces.isEmpty(), "语料里没有「接口 + 实现类」的组合，跳过");
+        AskAnswer answer = answerService.ask(repoId,
+                interfaces.get(0).name() + " 有哪些实现类？", null, 5);
 
         System.out.printf("%n[确定性回答] %s%n  证据：%n", answer.answer());
         answer.evidence().forEach(e -> System.out.printf("    %s  —— %s%n", e.location(), e.why()));
@@ -74,9 +87,17 @@ class DeterministicAnswerTest {
     void semanticQuestionsAreRefusedRatherThanAnsweredWithoutEvidenceWhenNoLlm() {
         // 模糊语义类问题需要模型；没配模型时必须明确报错，而不是编一个答案出来
         assertThatThrownBy(() -> answerService.ask(corpusRepoId(),
-                "这个项目的订单状态是怎么流转的？", null, 5))
+                "这个类大致是做什么的？", null, 5))
                 .isInstanceOf(LlmUnavailableException.class)
                 .hasMessageContaining("确定性能力不受影响");
+    }
+
+    /** 挑一个有调用点的方法 —— 题目从语料里长出来，换语料不用改测试。 */
+    private SymbolView firstWithCallers(long repoId) {
+        return repository.mostCalledMethods(repoId, 20).stream()
+                .filter(symbol -> !queryService.callers(symbol.id()).isEmpty())
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("语料里找不到有调用点的符号"));
     }
 
     /** 锁定本次要测的语料。 */

@@ -1,8 +1,10 @@
 package com.readcodeai.retrieve;
 
 import com.readcodeai.index.ProjectIndexer;
+import com.readcodeai.index.store.SymbolQueryRepository;
 import com.readcodeai.retrieve.model.ChunkHit;
 import com.readcodeai.retrieve.model.RepoView;
+import com.readcodeai.retrieve.model.SymbolView;
 import com.readcodeai.verify.TestCorpus;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -39,6 +41,9 @@ class TextSearchTest {
 
     @Autowired
     private ProjectIndexer indexer;
+
+    @Autowired
+    private SymbolQueryRepository symbolRepository;
 
     @Test
     void findsChunksByIdentifierAndTheChunkContentMatchesTheFileOnDisk() throws IOException {
@@ -87,11 +92,21 @@ class TextSearchTest {
                 .contains("登录", "检查");
 
         RepoView repo = corpus();
-        List<ChunkHit> hits = textRetriever.search(repo.id(), "登录检查是在哪里做的？", 8);
-        assertThat(hits)
-                .as("自然语言中文问句必须能检索到候选（这是问答的前置条件）")
+
+        // 产品里最常见的一问：中文问句 + 语料里的真实标识符。**这条任何语料都该成立**
+        String symbol = symbolRepository.mostCalledMethods(repo.id(), 1).get(0).name();
+        List<ChunkHit> mixed = textRetriever.search(repo.id(), "这个方法是怎么实现的：" + symbol + "？", 8);
+        assertThat(mixed)
+                .as("中文问句里夹着的标识符必须能检索到候选（标识符被中文二元组挤掉过一次）")
                 .isNotEmpty();
-        System.out.printf("%n[中文问句检索] \"登录检查是在哪里做的？\" 检索到 %d 段%n", hits.size());
+        System.out.printf("%n[中文问句+标识符检索] 命中 %d 段（标识符 = %s）%n", mixed.size(), symbol);
+
+        // 纯中文问句只有在语料真有中文（注释/字符串）时才可能命中 ——
+        // 英文语料上命中 0 段是**正确行为**，不该被断言成失败
+        List<ChunkHit> chinese = textRetriever.search(repo.id(), "登录检查是在哪里做的？", 8);
+        assumeTrue(corpusHasChinese(repo), "语料里没有中文，纯中文问句命中 0 段是正确结果，跳过");
+        assertThat(chinese).as("中文语料上，自然语言中文问句必须能检索到候选").isNotEmpty();
+        System.out.printf("[纯中文问句检索] 检索到 %d 段%n", chinese.size());
     }
 
     @Test
@@ -124,6 +139,24 @@ class TextSearchTest {
     }
 
     /** 锁定本次要测的语料（不能依赖「最近索引的仓库」）。 */
+    /** 语料里有没有中文（注释或字符串）—— 没有的话，"纯中文问句检索"这个用例本身没有意义。 */
+    private boolean corpusHasChinese(RepoView repo) {
+        try (var files = Files.walk(Path.of(repo.rootPath()), 8)) {
+            return files.filter(path -> path.toString().endsWith(".java"))
+                    .limit(200)
+                    .anyMatch(path -> {
+                        try {
+                            return Files.readString(path, StandardCharsets.UTF_8).codePoints()
+                                    .anyMatch(cp -> Character.UnicodeScript.of(cp) == Character.UnicodeScript.HAN);
+                        } catch (IOException e) {
+                            return false;
+                        }
+                    });
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     private RepoView corpus() {
         var resolved = TestCorpus.resolve(indexer, symbolQueryService);
         assumeTrue(resolved.isPresent(), "语料 " + TestCorpus.SAMPLE + " 不存在，跳过");

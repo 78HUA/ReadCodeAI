@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -121,7 +122,15 @@ public class EvidenceVerifier {
         if (item.file() == null || item.file().isBlank()) {
             return fail(item, FailureKind.FILE_NOT_FOUND, "证据里没有文件路径", 0);
         }
-        Path file = root.resolve(item.file().replace('\\', '/')).normalize();
+        Path file;
+        try {
+            file = root.resolve(item.file().replace('\\', '/')).normalize();
+        } catch (InvalidPathException e) {
+            // 模型给出的"文件"里有不合法的字符（实测：把行号一起写进了路径，如 "...Factory.java:144"）。
+            // 那是**待核验的脏数据**，不是能让整次问答崩掉的错误 —— 核验层的职责就是把它挡住，
+            // 它自己反倒抛异常就本末倒置了（这个 case 是第 5 步真实模型实验撞出来的）。
+            return fail(item, FailureKind.FILE_NOT_FOUND, "文件路径不合法：" + item.file(), 0);
+        }
         if (!file.startsWith(root)) {
             return fail(item, FailureKind.PATH_ESCAPES_REPO, "路径越出仓库范围：" + item.file(), 0);
         }
@@ -205,7 +214,25 @@ public class EvidenceVerifier {
     private static List<String> substantialLines(String text) {
         return normalizedLines(text).stream()
                 .filter(line -> line.length() >= MIN_SNIPPET_LENGTH)
+                .map(EvidenceVerifier::stripLineNumberPrefix)
+                .filter(line -> line.length() >= MIN_SNIPPET_LENGTH)
                 .toList();
+    }
+
+    /**
+     * 去掉模型抄进来的行号前缀（{@code 42: } 或 {@code 42| }）。
+     *
+     * <p><b>为什么必须容忍它</b>：工具读源码时给出的就是**带行号的原文**
+     * （模型需要行号才知道该引用哪几行），它照抄时很容易把行号一起抄进 snippet。
+     * 那是排版差异，不是编造 —— 不剥掉的话，一个完全正确的引用会被判成"内容对不上"。
+     * 这个自相矛盾是**写第 5 步的测试时撞出来的**：工具给出的片段本身也带了行号，
+     * 于是它自己的证据过不了自己家的核验。
+     *
+     * <p>剥掉行号不会削弱核验：行号是否有效由 ① 层单独管，
+     * 这一层只管"引的代码文本是否真在磁盘上"。
+     */
+    static String stripLineNumberPrefix(String line) {
+        return line.replaceFirst("^\\d{1,7}\\s*[:|]\\s*", "");
     }
 
     private static List<String> normalizedLines(String text) {

@@ -1,5 +1,6 @@
 package com.readcodeai.retrieve;
 
+import com.readcodeai.retrieve.model.SymbolKinds;
 import com.readcodeai.retrieve.model.SymbolView;
 import org.springframework.stereotype.Component;
 
@@ -168,7 +169,7 @@ public class QueryRouter {
     private static SymbolView firstExactType(List<String> candidates, SymbolLookup lookup) {
         for (String candidate : candidates) {
             for (SymbolView symbol : lookup.find(candidate)) {
-                if (symbol.name().equals(candidate) && isType(symbol.kind())) {
+                if (symbol.name().equals(candidate) && SymbolKinds.isType(symbol.kind())) {
                     return symbol;
                 }
             }
@@ -176,18 +177,11 @@ public class QueryRouter {
         return null;
     }
 
-    private static boolean isType(String kind) {
-        return switch (kind) {
-            case "CLASS", "INTERFACE", "ENUM", "RECORD", "ANNOTATION" -> true;
-            default -> false;
-        };
-    }
-
     private static boolean kindMatchesRoute(Route route, SymbolView symbol) {
-        boolean isType = isType(symbol.kind());
+        boolean isType = SymbolKinds.isType(symbol.kind());
         return switch (route) {
             // 问调用关系问的是「哪个方法」，类型没有调用边
-            case CALLERS, CALLEES -> "METHOD".equals(symbol.kind()) || "CONSTRUCTOR".equals(symbol.kind());
+            case CALLERS, CALLEES -> SymbolKinds.isCallable(symbol.kind());
             // 问实现类、问成员的目标都必须是类型
             case IMPLEMENTATIONS, STRUCTURE -> isType;
             default -> true;

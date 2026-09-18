@@ -189,6 +189,36 @@ class EvidenceVerifierTest {
                 .isFalse();
     }
 
+    @Test
+    void treatsAnIllegalPathAsABadEvidenceInsteadOfCrashing() throws IOException {
+        // 第 5 步的真实模型实验撞出来的：模型把行号写进了 file 字段（"...Real.java:4"），
+        // 路径解析直接抛 InvalidPathException（Windows 路径不允许冒号），整次问答崩掉。
+        // 核验层的职责是**挡住脏数据**，它自己反倒崩了就本末倒置了。
+        write("src/Real.java", REAL_FILE);
+
+        var report = verifier.verify(root(), List.of(
+                new AskEvidence("src/Real.java:4", 4, 6, "", "行号被写进了路径")));
+
+        assertThat(report.failed()).isEqualTo(1);
+        assertThat(report.evidence().get(0).failureKind()).isEqualTo(FailureKind.FILE_NOT_FOUND);
+        assertThat(report.evidence().get(0).detail()).contains("路径不合法");
+    }
+
+    @Test
+    void toleratesALineNumberPrefixCopiedIntoTheSnippet() throws IOException {
+        // 工具给出的源码是带行号的（模型需要行号才能引用），于是它照抄时会把 "4: " 一起抄进来。
+        // 那是排版差异而不是编造 —— 实测如果不容忍，一个完全正确的引用会被判成"内容对不上"。
+        write("src/Real.java", REAL_FILE);
+
+        var report = verifier.verify(root(), List.of(
+                new AskEvidence("src/Real.java", 4, 6,
+                        "4: public void target() {\n5:     int answer = 42;", "抄了行号")));
+
+        assertThat(report.evidence().get(0).snippetMatches())
+                .as("带行号前缀的引用应当仍被判为一致")
+                .isTrue();
+    }
+
     private Path root() {
         return repoRoot.toAbsolutePath().normalize();
     }

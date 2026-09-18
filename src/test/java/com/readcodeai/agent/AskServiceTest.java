@@ -5,7 +5,10 @@ import com.readcodeai.agent.model.AskAnswer;
 import com.readcodeai.agent.model.AskEvidence;
 import com.readcodeai.config.LlmClient;
 import com.readcodeai.index.ProjectIndexer;
+import com.readcodeai.index.store.SymbolQueryRepository;
 import com.readcodeai.retrieve.SymbolQueryService;
+import com.readcodeai.retrieve.model.RepoView;
+import com.readcodeai.retrieve.model.SymbolView;
 import com.readcodeai.verify.TestCorpus;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -39,13 +42,19 @@ class AskServiceTest {
     @Autowired
     private SymbolQueryService queryService;
 
+    @Autowired
+    private SymbolQueryRepository repository;
+
     @Test
     void answersWithEvidenceAndOnlyCitesChunksItWasGiven() {
         assumeTrue(llmClient.available(), "未配置 LLM，跳过问答验证");
 
-        AskAnswer answer = answerService.ask(corpusRepoId(), "登录检查是在哪里做的？", null, 8);
+        RepoView repo = corpus();
+        SymbolView target = mostCalled(repo.id());
+        String question = "这个类大致是做什么的：" + target.qualifiedName() + "？";
+        AskAnswer answer = answerService.ask(repo.id(), question, null, 8);
 
-        System.out.printf("%n[问答] 问题：登录检查是在哪里做的？%n");
+        System.out.printf("%n[问答] 问题：%s%n", question);
         System.out.printf("  结论：%s%n", answer.refused() ? "(拒答) " + answer.refusalReason() : answer.answer());
         System.out.printf("  证据：%n");
         answer.evidence().forEach(e -> System.out.printf("    %s  —— %s%n", e.location(), e.why()));
@@ -77,9 +86,12 @@ class AskServiceTest {
         assertThat(answer.verification().verified())
                 .as("通过核验的证据数应等于返回的证据数")
                 .isEqualTo(answer.evidence().size());
-        assertThat(answer.verification().allVerified())
-                .as("返回的答案里不该混入未通过核验的证据")
-                .isTrue();
+        // 这里断言的**不变量**是"返回的证据都通过过核验"（上面那条已覆盖）。
+        // 不再断言 verification().firstPassClean()：它说的是"首轮一条都没被拦下"，
+        // 而首轮被拦、定向修正后通过的证据是**正确流程**（实测：模型引错行号后被修正）。
+        // 把两者混为一谈会把正常行为判成失败 —— 这个误判是第 5 步跑真实模型时暴露的。
+        System.out.printf("  首轮未通过 %d 条 · 定向修正 %d 处（修正后仍须重新核验）%n",
+                answer.verification().mismatch(), answer.verification().repairs().size());
 
         // 防幻觉的第一道闸门：模型引用的文件必须来自本次检索结果，不能凭空出现
         for (AskEvidence evidence : answer.evidence()) {
@@ -95,21 +107,29 @@ class AskServiceTest {
     void scopingToOneFileNarrowsTheSearch() {
         assumeTrue(llmClient.available(), "未配置 LLM，跳过问答验证");
 
-        AskAnswer answer = answerService.ask(corpusRepoId(), "这个过滤器做了什么？",
-                "src/main/java/com/harmony/reggie/filter/", 8);
+        RepoView repo = corpus();
+        SymbolView target = mostCalled(repo.id());
+        String directory = target.filePath().substring(0, target.filePath().lastIndexOf('/') + 1);
+        AskAnswer answer = answerService.ask(repo.id(),
+                target.name() + " 这些代码是做什么的？", directory, 8);
 
-        System.out.printf("%n[单文件范围问答] 检索到的片段：%s%n", answer.retrievedFrom());
+        System.out.printf("%n[单文件范围问答] 范围 %s · 检索到的片段：%s%n", directory, answer.retrievedFrom());
 
         assertThat(answer.retrievedFrom()).isNotEmpty();
         assertThat(answer.retrievedFrom())
                 .as("限定范围后，检索结果必须都落在该目录下")
-                .allSatisfy(location -> assertThat(location).contains("reggie/filter/"));
+                .allSatisfy(location -> assertThat(location).contains(directory));
     }
 
     /** 锁定本次要测的语料（不能依赖「最近索引的仓库」）。 */
-    private long corpusRepoId() {
+    private RepoView corpus() {
         var corpus = TestCorpus.resolve(indexer, queryService);
         assumeTrue(corpus.isPresent(), "语料 " + TestCorpus.SAMPLE + " 不存在，跳过");
-        return corpus.get().id();
+        return corpus.get();
+    }
+
+    /** 题目从语料里长出来：写死某个项目的符号名会让整个测试类绑死在一个语料上。 */
+    private SymbolView mostCalled(long repoId) {
+        return repository.mostCalledMethods(repoId, 1).get(0);
     }
 }

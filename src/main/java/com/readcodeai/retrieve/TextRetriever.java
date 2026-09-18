@@ -72,28 +72,39 @@ public class TextRetriever {
      * 真正的语义检索是第 3 层（向量），第一版不做。
      */
     static List<String> tokenize(String query) {
-        LinkedHashSet<String> tokens = new LinkedHashSet<>();
+        // 两类词分开收集：截断时**优先保 ASCII 标识符**。
+        // 理由是被实测逼出来的：中文问句的二元组很容易占满配额，把类名/方法名这些真正的线索挤掉 ——
+        // 对英文代码库问「这个类大致是做什么的：com.google.gson.Gson？」曾因此命中 0 条。
+        // 标识符是精确 token，二元组只是"够用的中文切分"，谁更值钱一目了然。
+        LinkedHashSet<String> asciiTokens = new LinkedHashSet<>();
+        LinkedHashSet<String> cjkTokens = new LinkedHashSet<>();
         StringBuilder ascii = new StringBuilder();
         StringBuilder cjk = new StringBuilder();
 
         for (int i = 0; i < query.length(); i++) {
             char c = query.charAt(i);
             if (isCjk(c)) {
-                addAscii(tokens, ascii);
+                addAscii(asciiTokens, ascii);
                 cjk.append(c);
             } else if (c == '_' || c == '$' || Character.isLetterOrDigit(c)) {
-                addCjk(tokens, cjk);
+                addCjk(cjkTokens, cjk);
                 ascii.append(c);
             } else {
-                addAscii(tokens, ascii);
-                addCjk(tokens, cjk);
+                addAscii(asciiTokens, ascii);
+                addCjk(cjkTokens, cjk);
             }
         }
-        addAscii(tokens, ascii);
-        addCjk(tokens, cjk);
+        addAscii(asciiTokens, ascii);
+        addCjk(cjkTokens, cjk);
 
-        List<String> result = new ArrayList<>(tokens);
-        return result.size() <= MAX_TOKENS ? result : result.subList(0, MAX_TOKENS);
+        List<String> result = new ArrayList<>(asciiTokens);
+        for (String token : cjkTokens) {
+            if (result.size() >= MAX_TOKENS) {
+                break;
+            }
+            result.add(token);
+        }
+        return result;
     }
 
     /** 汉字（含扩展区）判定。注意 {@code Character.isLetterOrDigit} 对汉字也返回 true，所以必须先判它。 */

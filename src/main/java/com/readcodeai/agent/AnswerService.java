@@ -1,6 +1,5 @@
 package com.readcodeai.agent;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.readcodeai.agent.model.AnsweredBy;
 import com.readcodeai.agent.model.AskAnswer;
 import com.readcodeai.agent.model.AskEvidence;
@@ -11,6 +10,7 @@ import com.readcodeai.evidence.EvidenceRepair;
 import com.readcodeai.evidence.EvidenceVerifier;
 import com.readcodeai.retrieve.ContextSelector;
 import com.readcodeai.retrieve.QueryRouter;
+import com.readcodeai.retrieve.SymbolLookups;
 import com.readcodeai.retrieve.SymbolQueryService;
 import com.readcodeai.retrieve.TextRetriever;
 import com.readcodeai.retrieve.model.CallSiteView;
@@ -19,10 +19,6 @@ import com.readcodeai.retrieve.model.SymbolView;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-
-// 注意：Spring Boot 4 用的是 Jackson 3 —— databind 搬到了 tools.jackson，
-// 但注解仍在 com.fasterxml.jackson.annotation（这就是为什么客户端那边的注解能编译、databind 却不能）
-import tools.jackson.databind.ObjectMapper;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -71,7 +67,6 @@ public class AnswerService {
     private final EvidenceRepair evidenceRepair;
     private final LlmClient llmClient;
     private final ReadCodeAiProperties properties;
-    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public AnswerService(TextRetriever textRetriever,
                          SymbolQueryService symbolQueryService,
@@ -107,20 +102,8 @@ public class AnswerService {
 
         // 先路由：**确定性问题根本不叫模型**。「谁调用了 X」的答案是调用图算出来的，
         // 让模型去"组织"它，等于把确定性换成不确定性。
-        QueryRouter.Routed routed = queryRouter.route(effectiveRepoId, question, new QueryRouter.SymbolLookup() {
-            @Override
-            public List<SymbolView> find(String name) {
-                // 上限给到 50：`fromJson` 这种名字在真实仓库里有十几个重载，
-                // 只取 10 个会把目标截断掉（评估集实测抓出来的）
-                return symbolQueryService.locate(effectiveRepoId, name, 50);
-            }
-
-            @Override
-            public List<SymbolView> findInType(String typeQualifiedName, String name) {
-                // 限定查找：问题里同时给了类名和方法名时，靠它把范围锁死（裸方法名往往不唯一）
-                return symbolQueryService.findMembersInType(effectiveRepoId, typeQualifiedName, name);
-            }
-        });
+        QueryRouter.Routed routed = queryRouter.route(effectiveRepoId, question,
+                SymbolLookups.of(symbolQueryService, effectiveRepoId));
         if (routed.isDeterministic()) {
             log.info("问题走确定性路线：route={} targets={}", routed.route(), routed.targets().size());
             return answerDeterministically(routed, repoRoot, elapsedMillis(start));
@@ -158,9 +141,9 @@ public class AnswerService {
         }
 
         LlmClient.Completion completion = llmClient.complete(SYSTEM_PROMPT, buildUserPrompt(question, selected));
-        LlmAnswer parsed;
+        ModelJson.SingleHopAnswer parsed;
         try {
-            parsed = parse(completion.content());
+            parsed = ModelJson.parse(completion.content(), ModelJson.SingleHopAnswer.class);
         } catch (ModelOutputFormatException e) {
             // 模型输出不是合法 JSON：**不崩，也不假装答出来了** —— 明确归类并拒答。
             // 这类失败是可以被计数的质量指标（格式错误率），不是异常。
@@ -184,7 +167,7 @@ public class AnswerService {
 
         // 解析宽容、校验严格：小模型常给 null 或缺字段，容错是为了不整条失败；
         // 但缺字段的证据必须被丢掉 —— 放出去就等于拿脏数据当证据。
-        List<AskEvidence> evidence = validEvidence(parsed.evidence());
+        List<AskEvidence> evidence = ModelJson.validEvidence(parsed.evidence());
         if (evidence.size() < (parsed.evidence() == null ? 0 : parsed.evidence().size())) {
             log.warn("模型给出的证据里有 {} 条缺文件或行号，已丢弃",
                     parsed.evidence().size() - evidence.size());
@@ -340,21 +323,6 @@ public class AnswerService {
         return new AskEvidence(symbol.filePath(), symbol.startLine(), symbol.endLine(), "", why);
     }
 
-    /** 丢掉缺文件或缺行号的证据条目 —— 这类条目无法核验，留着只会污染答案。 */
-    private static List<AskEvidence> validEvidence(List<RawEvidence> raw) {
-        if (raw == null) {
-            return List.of();
-        }
-        return raw.stream()
-                .filter(e -> e.file() != null && !e.file().isBlank())
-                .filter(e -> e.startLine() != null && e.endLine() != null)
-                .filter(e -> e.startLine() > 0 && e.endLine() >= e.startLine())
-                .map(e -> new AskEvidence(e.file(), e.startLine(), e.endLine(),
-                        e.snippet() == null ? "" : e.snippet(),
-                        e.why() == null ? "" : e.why()))
-                .toList();
-    }
-
     private String buildUserPrompt(String question, List<ChunkHit> chunks) {
         StringBuilder prompt = new StringBuilder();
         prompt.append("问题：").append(question).append("\n\n可用的代码片段：\n");
@@ -370,83 +338,6 @@ public class AnswerService {
         return prompt.toString();
     }
 
-    /**
-     * 解析模型的 JSON。
-     *
-     * <p>三层防线，因为**小模型给出的 JSON 经常不合法**（实测踩过：出现 {@code \(} 这种非法转义，
-     * 整道题直接崩掉）：
-     * <ol>
-     *   <li>剥壳：模型爱把 JSON 包在 Markdown 代码块里，或前后加一句话</li>
-     *   <li>修补：把字符串里的**非法转义**修掉（这是实测最常见的一种）</li>
-     *   <li>失败就**明确归类为「模型输出格式错误」并拒答** —— 不崩、也不假装答出来了</li>
-     * </ol>
-     *
-     * <p>**绝不退回"把原文当答案"** —— 那等于绕过「必须带证据」这条验收标准。
-     */
-    private LlmAnswer parse(String raw) throws ModelOutputFormatException {
-        String text = stripFences(raw);
-        int start = text.indexOf('{');
-        int end = text.lastIndexOf('}');
-        if (start < 0 || end <= start) {
-            throw new ModelOutputFormatException("模型没有返回 JSON", raw);
-        }
-        String json = text.substring(start, end + 1);
-        try {
-            return objectMapper.readValue(json, LlmAnswer.class);
-        } catch (Exception first) {
-            try {
-                return objectMapper.readValue(sanitizeJson(json), LlmAnswer.class);
-            } catch (Exception second) {
-                throw new ModelOutputFormatException(
-                        "JSON 不合法（修补后仍失败）：" + second.getMessage(), raw);
-            }
-        }
-    }
-
-    private static String stripFences(String raw) {
-        String text = raw == null ? "" : raw.strip();
-        if (text.startsWith("```")) {
-            int firstNewline = text.indexOf('\n');
-            int lastFence = text.lastIndexOf("```");
-            if (firstNewline > 0 && lastFence > firstNewline) {
-                text = text.substring(firstNewline + 1, lastFence).strip();
-            }
-        }
-        return text;
-    }
-
-    /**
-     * 修掉 JSON 字符串里的非法转义：{@code \(} 这种模型写错的转义，去掉反斜杠、保留字符本身。
-     * 合法的转义（双引号、反斜杠、斜杠、b、f、n、r、t，以及 unicode 形式）原样保留。
-     *
-     * <p>已知局限：引号配对用的是"遇到反斜杠外的引号就切换状态"这种简化判断，
-     * 遇到字符串内的裸引号会判断错 —— 所以它只是**尽力而为的修补**，不是解析器。
-     */
-    static String sanitizeJson(String json) {
-        StringBuilder out = new StringBuilder(json.length());
-        boolean inString = false;
-        for (int i = 0; i < json.length(); i++) {
-            char c = json.charAt(i);
-            if (c == '\\' && inString) {
-                char next = i + 1 < json.length() ? json.charAt(i + 1) : 0;
-                boolean legal = next == '"' || next == '\\' || next == '/' || next == 'b'
-                        || next == 'f' || next == 'n' || next == 'r' || next == 't' || next == 'u';
-                if (legal) {
-                    out.append(c);
-                    out.append(next);
-                    i++;
-                }
-                // 非法转义：丢掉反斜杠（连 next 一起在下一轮原样追加）
-                continue;
-            }
-            if (c == '"') {
-                inString = !inString;
-            }
-            out.append(c);
-        }
-        return out.toString();
-    }
-
     private static long elapsedMillis(long startNanos) {
         return (System.nanoTime() - startNanos) / 1_000_000;
     }
@@ -456,35 +347,5 @@ public class AnswerService {
             return "(空)";
         }
         return raw.length() <= 200 ? raw : raw.substring(0, 200) + "...";
-    }
-
-    /** 模型输出不是合法 JSON。**它是可计数的质量指标，不是崩溃**。 */
-    static class ModelOutputFormatException extends RuntimeException {
-
-        private final transient String rawOutput;
-
-        ModelOutputFormatException(String message, String rawOutput) {
-            super(message);
-            this.rawOutput = rawOutput;
-        }
-
-        String rawOutput() {
-            return rawOutput;
-        }
-    }
-
-    /**
-     * 模型返回的 JSON 结构（内部传输用，不对外暴露）。
-     *
-     * <p><b>全部字段用包装类型</b>，不用原始类型：实测小模型会把 {@code refused} 给成 {@code null}，
-     * 而 Jackson 3 默认拒绝 null → 原始类型，一条好答案会因为一个缺字段整条解析失败。
-     * 宽容解析 + 严格校验，比"格式必须完美"更符合真实模型的行为。
-     */
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    record LlmAnswer(String answer, List<RawEvidence> evidence, Boolean refused, String refusalReason) {
-    }
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    record RawEvidence(String file, Integer startLine, Integer endLine, String snippet, String why) {
     }
 }

@@ -613,7 +613,7 @@ readcodeai:
 | **目标** | 让问答覆盖整个仓库，同时**不把仓库塞进上下文**；并让「给个链接就能用」成立 |
 | **产出 A** | 检索范围扩到全仓库；选片策略（相关性排序 + 截断 + 去重）；token 预算控制 |
 | **产出 B** | **远程仓库拉取**：支持 `{gitUrl}` 入口，公开仓库直接可用 |
-| **关键决策** | **用 tarball 下载，不用 `git clone`** —— ①本机实测 `github.com:443` 间歇不通，而 `codeload.github.com` / `api.github.com` 稳定（push 直连 3 次全败、走 API 才成功）；②我们只需要**某个提交的工作区快照**，不需要 git 历史，tarball 更小更快；③顺带能从 API 拿到 commit SHA，正好填 `repo.commit_hash` |
+| **关键决策** | **用源码包（zipball）下载，不用 `git clone`** —— ①本机实测 `github.com:443` 间歇不通，而 `codeload.github.com` / `api.github.com` 稳定；②我们只需要**某个提交的工作区快照**，不需要 git 历史，源码包更小更快（gson 只有 755 KB）；③**选 zip 而不是 tar.gz：JDK 原生支持 `ZipInputStream` 却没有 tar 支持，这样零新增依赖**；④`/zip/HEAD` 实测可直接取默认分支快照，省掉一次「先查默认分支」的 API 调用 |
 | **安全约束** | **主机白名单**（只允许 github.com 及其下载域，否则贴个内网地址就是 SSRF）、包大小上限、解压路径校验（防 zip slip）；私有仓库走环境变量里的 token，不进仓库 |
 | **验证 A** | 在中等规模仓库上跑，**记录单次问答的 token 消耗与耗时分布** |
 | **验证 B** | 贴一个真实 GitHub 公开仓库链接 → 拉取 → 索引 → 摘要，全程不碰命令行，记录端到端耗时 |

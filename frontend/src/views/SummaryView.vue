@@ -165,8 +165,31 @@ onMounted(() => load(false))
     </div>
 
     <div class="panel">
-      <h3 style="margin-top: 0">每个模块大致负责什么（模型补的）</h3>
+      <h3 style="margin-top: 0">这个项目是做什么的</h3>
       <template v-if="summary.semantics.available">
+        <div v-if="summary.semantics.overview" class="answer" style="margin-bottom: 10px">
+          <p style="margin: 0 0 8px; font-size: 15px; font-weight: 600">
+            {{ summary.semantics.overview.text }}
+          </p>
+          <ul v-if="summary.semantics.features && summary.semantics.features.length"
+              style="margin: 0; padding-left: 20px">
+            <li v-for="feature in summary.semantics.features" :key="feature.text">
+              {{ feature.text }}
+              <span v-if="!feature.verified" class="badge warn" style="margin-left: 6px">
+                索引里没有：{{ feature.unverifiedSymbols.join('、') }}
+              </span>
+            </li>
+          </ul>
+          <p class="small muted" style="margin: 6px 0 0">
+            这句话的依据是**算出来的材料**：业务对象名、接口路径、核心类、模块划分（都在下面），
+            模型只负责把它组织成一句人话；它提到的每个名字都已回索引核对。
+          </p>
+        </div>
+        <p v-else class="notice">
+          这次没有拿到项目级的一句话（模型没给或格式不对）—— 下面的模块说明与结构部分照常。
+        </p>
+
+        <h3>每个模块大致负责什么</h3>
         <div class="row" style="margin-bottom: 8px">
           <span v-if="summary.semantics.cached" class="badge info">
             这份说明来自缓存（生成于 {{ (summary.semantics.generatedAt || '').replace('T', ' ').slice(0, 19) }}，本次没有调用模型）

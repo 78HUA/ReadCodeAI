@@ -35,14 +35,19 @@ public class AutoGrader {
     }
 
     public Grade grade(GeneratedQuestion question, AskAnswer answer) {
+        return gradeKeys(question, claimedKeys(answer));
+    }
+
+    /**
+     * 只看位置集合的判卷入口 —— 给**不带 AskAnswer 的实验**用（检索级对比只有位置集合，没有答案对象）。
+     *
+     * <p>从 {@link #grade} 里拆出来而不是让实验自己拼一个假 AskAnswer：
+     * 判卷口径只能有一份，两处各写一遍迟早长歪。
+     */
+    public static Grade gradeKeys(GeneratedQuestion question, Set<String> claimed) {
         Set<String> truth = new LinkedHashSet<>(question.truthKeys());
         if (truth.isEmpty()) {
             return Grade.missed("题目没有标准答案（不该出现）");
-        }
-
-        Set<String> claimed = new LinkedHashSet<>();
-        for (AskEvidence evidence : answer.evidence()) {
-            claimed.add(QuestionGenerator.key(evidence.file(), evidence.startLine()));
         }
 
         if (question.type() == QType.LOCATE) {

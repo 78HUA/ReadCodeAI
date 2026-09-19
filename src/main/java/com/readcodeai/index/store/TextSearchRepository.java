@@ -58,4 +58,28 @@ public class TextSearchRepository {
     public TextSearchRepository(JdbcTemplate jdbc) {
         this.jdbc = jdbc;
     }
+
+    /**
+     * 一个仓库全部 SYMBOL 类 chunk 的元数据（带内容）—— 向量检索用它做候选池。
+     *
+     * <p>放在这里而不是新开一个仓库类：全文检索与向量检索读的是**同一份 chunk 元数据**，
+     * 分两个类只会让两边的字段慢慢长歪。全量加载的规模判据见 {@code ChunkEmbeddingRepository}。
+     */
+    public List<ChunkHit> selectSymbolChunks(long repoId) {
+        return jdbc.query("""
+                SELECT c.id, c.kind, c.start_line, c.end_line, c.token_estimate, c.content,
+                       f.path AS file_path,
+                       s.id AS symbol_id, s.qualified_name AS symbol_qname
+                  FROM `chunk` c
+                  JOIN `source_file` f ON f.id = c.file_id
+                  LEFT JOIN `symbol` s ON s.id = c.symbol_id
+                 WHERE c.repo_id = ? AND c.kind = 'SYMBOL'
+                 ORDER BY c.id
+                """, (rs, rowNum) -> new ChunkHit(
+                rs.getLong("id"), rs.getString("kind"), rs.getString("file_path"),
+                rs.getInt("start_line"), rs.getInt("end_line"),
+                rs.getObject("symbol_id") == null ? null : rs.getLong("symbol_id"),
+                rs.getString("symbol_qname"), rs.getInt("token_estimate"),
+                0, rs.getString("content")), repoId);
+    }
 }

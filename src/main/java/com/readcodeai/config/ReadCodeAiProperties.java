@@ -14,6 +14,7 @@ public class ReadCodeAiProperties {
     private final Retrieve retrieve = new Retrieve();
     private final Cache cache = new Cache();
     private final Verify verify = new Verify();
+    private final Embedding embedding = new Embedding();
 
     /** 启动时校验，非法值当场失败 —— 预算参数写错要到运行时才暴露，代价太大。 */
     @PostConstruct
@@ -23,6 +24,7 @@ public class ReadCodeAiProperties {
         retrieve.validate();
         cache.validate();
         verify.validate();
+        embedding.validate();
     }
 
     public Llm getLlm() {
@@ -43,6 +45,79 @@ public class ReadCodeAiProperties {
 
     public Verify getVerify() {
         return verify;
+    }
+
+    public Embedding getEmbedding() {
+        return embedding;
+    }
+
+    /**
+     * 向量检索基线（第 3 层检索）。
+     *
+     * <p>定位要说清楚：它是**对比实验的基线 + 将来"模糊语义查找"的接口位**，
+     * 没有接进问答路由 —— 确定性问题走符号表/调用图更准，这个判断不因为有了向量而改变。
+     * 与 LLM **共用 base-url 与 api-key**（同一把 Key、同一个供应商），所以这里没有自己的连接配置。
+     */
+    public static class Embedding {
+
+        /** 关掉即降级为 Noop：索引与问答完全不受影响，只是向量检索与对比实验不可用。 */
+        private boolean enabled = true;
+
+        /** 换模型 = 换向量空间，缓存的向量全部作废（键里带 model 就是为此）。 */
+        private String model = "embedding-3";
+
+        /**
+         * 向量维度。实测 embedding-3 支持 dimensions 参数：默认 2048，指定 1024 省一半存储与内存，
+         * 召回差异交给对比实验去量（见 verification-log）。
+         */
+        private int dimensions = 1024;
+
+        /** 一次请求最多带多少条输入（客户端不做二次分包，批的大小由调用方控制）。 */
+        private int batchSize = 16;
+
+        void validate() {
+            if (dimensions <= 0) {
+                throw new IllegalStateException("readcodeai.embedding.dimensions 必须大于 0");
+            }
+            if (batchSize <= 0) {
+                throw new IllegalStateException("readcodeai.embedding.batch-size 必须大于 0");
+            }
+            if (model == null || model.isBlank()) {
+                throw new IllegalStateException("readcodeai.embedding.model 不能为空");
+            }
+        }
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public String getModel() {
+            return model;
+        }
+
+        public void setModel(String model) {
+            this.model = model;
+        }
+
+        public int getDimensions() {
+            return dimensions;
+        }
+
+        public void setDimensions(int dimensions) {
+            this.dimensions = dimensions;
+        }
+
+        public int getBatchSize() {
+            return batchSize;
+        }
+
+        public void setBatchSize(int batchSize) {
+            this.batchSize = batchSize;
+        }
     }
 
     /**

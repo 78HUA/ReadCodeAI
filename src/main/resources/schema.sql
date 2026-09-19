@@ -226,3 +226,26 @@ CREATE TABLE IF NOT EXISTS index_job
     CONSTRAINT fk_job_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '索引任务与进度';
+
+-- 12. chunk 向量：第 3 层检索（向量相似度）的存储。
+--
+-- 为什么是 BLOB 而不是向量库：语料是万级 chunk × 1024 维 float ≈ 几 MB，
+-- 进程内算余弦绰绰有余；真到了几十万 chunk 或多实例共享，再考虑 pgvector（判据在 design-outline.md）。
+-- 为什么键里带 model 与 content_hash：换模型 = 换向量空间，旧向量不可比；
+-- chunk 内容变了（重新索引）旧向量就是错的 —— 用 hash 比对，不一致就重算。
+CREATE TABLE IF NOT EXISTS chunk_embedding
+(
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    repo_id      BIGINT      NOT NULL,
+    chunk_id     BIGINT      NOT NULL,
+    model        VARCHAR(64) NOT NULL,
+    dimensions   INT         NOT NULL,
+    content_hash CHAR(64)    NOT NULL,
+    vector       BLOB        NOT NULL COMMENT 'float[] 按小端序列化',
+    created_at   DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_chunk_vector (chunk_id, model),
+    KEY idx_chunk_vector_repo (repo_id, model),
+    CONSTRAINT fk_chunk_vector_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE,
+    CONSTRAINT fk_chunk_vector_chunk FOREIGN KEY (chunk_id) REFERENCES chunk (id) ON DELETE CASCADE
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT 'chunk 向量缓存（第 3 层检索基线）';

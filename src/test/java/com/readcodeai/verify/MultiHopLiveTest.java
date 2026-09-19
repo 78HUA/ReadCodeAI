@@ -67,7 +67,7 @@ class MultiHopLiveTest {
 
     @Test
     void runsTheChainExperimentAgainstTheRealModelAndReportsTheNumbers() {
-        assumeTrue(llmClient.available(), "未配置 LLM（readcodeai.llm.*），跳过真实多跳实验");
+        LiveLlm.assumeReachable(llmClient);
         RepoView repo = corpus();
         List<ChainQuestionGenerator.ChainQuestion> questions = smallChains(repo.id(), QUESTION_COUNT);
         assumeTrue(questions.size() >= 2, "语料里没有足够的链式问题，跳过");

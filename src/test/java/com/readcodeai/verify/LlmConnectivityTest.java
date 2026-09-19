@@ -6,7 +6,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * 第 0 步验证 3 的另一半：**配好 Key 时的真实链路**（此前只验证了「无 Key 降级」）。
@@ -24,7 +23,8 @@ class LlmConnectivityTest {
 
     @Test
     void callsTheConfiguredModelAndReportsLatencyAndTokens() {
-        assumeTrue(llmClient.available(), "未配置 LLM（readcodeai.llm.*），跳过真实调用验证");
+        // 连不上就跳过并写明理由（外部波动不是代码问题，见 LiveLlm）
+        LiveLlm.assumeReachable(llmClient);
 
         long start = System.nanoTime();
         LlmClient.Completion completion = llmClient.complete(

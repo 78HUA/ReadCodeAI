@@ -124,4 +124,13 @@ public class ScriptedLlmClient implements LlmClient {
         return "{\"thought\":\"材料不够\",\"final\":{\"answer\":\"\",\"evidence\":[],\"refused\":true,"
                 + "\"refusalReason\":\"" + reason + "\"}}";
     }
+
+    /**
+     * 单跳路径的拒答形状（**平铺**）—— 与 {@link #singleHopAnswer} 同一个理由：
+     * 多跳那支套了一层 {@code final}，套错了单跳解析器读不到 refused 字段，
+     * 于是"模型拒答"会被误认成"模型给了结论却没证据"，走到另一条分支上去。
+     */
+    public static String singleHopRefuse(String reason) {
+        return "{\"answer\":\"\",\"evidence\":[],\"refused\":true,\"refusalReason\":\"" + reason + "\"}";
+    }
 }

@@ -224,8 +224,8 @@ class AgentAnswerCacheTest {
 
     private AgentService serviceWith(ScriptedLlmClient client, AnswerCache cache) {
         AnswerService singleHop = new AnswerService(textRetriever, queries, queryRouter, contextSelector,
-                evidenceVerifier, evidenceRepair, client, properties);
-        return new AgentService(singleHop, new AgentLoop(toolRegistry, evidenceVerifier, client),
+                evidenceVerifier, evidenceRepair, com.readcodeai.verify.TestCheckers.NONE, client, properties);
+        return new AgentService(singleHop, new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, client),
                 queryRouter, queries, client, cache, properties);
     }
 

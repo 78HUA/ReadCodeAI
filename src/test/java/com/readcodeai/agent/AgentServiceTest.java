@@ -144,7 +144,7 @@ class AgentServiceTest {
     @Test
     void multiHopRefusesToPretendWhenNoModelIsConfigured() {
         AgentService service = new AgentService(answerService,
-                new AgentLoop(toolRegistry, evidenceVerifier, new NoopLlmClient("测试：未配置")),
+                new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, new NoopLlmClient("测试：未配置")),
                 queryRouter, queries, new NoopLlmClient("测试：未配置"),
                 new com.readcodeai.agent.cache.NoopAnswerCache("测试"), properties);
         RepoView repo = corpus();
@@ -163,8 +163,8 @@ class AgentServiceTest {
      */
     private AgentService serviceWith(LlmClient client) {
         AnswerService singleHop = new AnswerService(textRetriever, queries, queryRouter, contextSelector,
-                evidenceVerifier, evidenceRepair, client, properties);
-        return new AgentService(singleHop, new AgentLoop(toolRegistry, evidenceVerifier, client),
+                evidenceVerifier, evidenceRepair, com.readcodeai.verify.TestCheckers.NONE, client, properties);
+        return new AgentService(singleHop, new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, client),
                 queryRouter, queries, client, new com.readcodeai.agent.cache.NoopAnswerCache("测试"),
                 properties);
     }

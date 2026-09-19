@@ -21,6 +21,8 @@ public enum StopReason {
     FORMAT_ERROR("模型输出不是合法 JSON"),
     /** 模型给了结论，但所有证据都没通过磁盘核验 */
     EVIDENCE_REJECTED("结论的全部证据未通过核验"),
+    /** 证据通过了 ①② 层，但 ③ 层判定它不支持结论（只在 support-check=reject 时会出现） */
+    SUPPORT_REJECTED("证据不支持结论（③ 层判定）"),
     /** 模型给了结论却没有任何证据 —— 按验收标准不予返回 */
     NO_EVIDENCE("结论没有任何证据"),
     /** 模型自己说查不到 */

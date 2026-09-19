@@ -3,11 +3,13 @@ package com.readcodeai.agent;
 import com.readcodeai.agent.model.AnsweredBy;
 import com.readcodeai.agent.model.AskAnswer;
 import com.readcodeai.agent.model.AskEvidence;
+import com.readcodeai.agent.model.SupportCheck;
 import com.readcodeai.agent.model.VerificationSummary;
 import com.readcodeai.config.LlmClient;
 import com.readcodeai.config.ReadCodeAiProperties;
 import com.readcodeai.evidence.EvidenceRepair;
 import com.readcodeai.evidence.EvidenceVerifier;
+import com.readcodeai.evidence.SupportChecker;
 import com.readcodeai.retrieve.ContextSelector;
 import com.readcodeai.retrieve.QueryRouter;
 import com.readcodeai.retrieve.SymbolLookups;
@@ -65,6 +67,7 @@ public class AnswerService {
     private final ContextSelector contextSelector;
     private final EvidenceVerifier evidenceVerifier;
     private final EvidenceRepair evidenceRepair;
+    private final SupportChecker supportChecker;
     private final LlmClient llmClient;
     private final ReadCodeAiProperties properties;
 
@@ -74,6 +77,7 @@ public class AnswerService {
                          ContextSelector contextSelector,
                          EvidenceVerifier evidenceVerifier,
                          EvidenceRepair evidenceRepair,
+                         SupportChecker supportChecker,
                          LlmClient llmClient,
                          ReadCodeAiProperties properties) {
         this.textRetriever = textRetriever;
@@ -82,6 +86,7 @@ public class AnswerService {
         this.contextSelector = contextSelector;
         this.evidenceVerifier = evidenceVerifier;
         this.evidenceRepair = evidenceRepair;
+        this.supportChecker = supportChecker;
         this.llmClient = llmClient;
         this.properties = properties;
     }
@@ -140,7 +145,20 @@ public class AnswerService {
                     retrievedFrom, 0, elapsedMillis(start));
         }
 
-        LlmClient.Completion completion = llmClient.complete(SYSTEM_PROMPT, buildUserPrompt(question, selected));
+        LlmClient.Completion completion;
+        try {
+            completion = llmClient.complete(SYSTEM_PROMPT, buildUserPrompt(question, selected));
+        } catch (RuntimeException e) {
+            // 调用故障与"片段里没有答案"必须分开报 —— 否则使用者会把网络问题当成分析结论。
+            // 多跳那条路一开始就是这么处理的（StopReason.LLM_CALL_FAILED），这里补齐：
+            // 实测撞到过 60 秒读超时（一次测试里连着调了很多次之后），单跳当时是把异常抛成了 500。
+            log.warn("单跳模型调用失败：{}", e.toString());
+            return new AskAnswer(null, List.of(), true,
+                    "模型调用失败（" + e.getClass().getSimpleName() + "：" + e.getMessage()
+                            + "）。这是调用故障，不是「仓库里没有答案」。",
+                    AnsweredBy.LLM, retrievedFrom, hits.size(), selected.size(), 0, 0,
+                    elapsedMillis(start), VerificationSummary.none());
+        }
         ModelJson.SingleHopAnswer parsed;
         try {
             parsed = ModelJson.parse(completion.content(), ModelJson.SingleHopAnswer.class);
@@ -201,7 +219,7 @@ public class AnswerService {
                     "模型的证据全部未通过核验（文件、行号或片段与磁盘对不上），按设计不予返回",
                     AnsweredBy.LLM, retrievedFrom, hits.size(), selected.size(),
                     completion.promptTokens(), completion.completionTokens(), elapsedMillis(start),
-                    new VerificationSummary(0, firstPass.failed(), repairs));
+                    VerificationSummary.of(0, firstPass.failed(), repairs, "证据没过 ② 层，轮不到 ③ 层"));
         }
         if (evidence.isEmpty()) {
             // 验收标准：没有证据的答案不许返回 —— 所以这里不把模型的话原样递出去
@@ -213,10 +231,38 @@ public class AnswerService {
                     VerificationSummary.none());
         }
 
+        // ---- ③ 层：这段代码**支持**这条结论吗（①② 层证明不了这件事，见 SupportCheck 的注释）----
+        SupportCheck support = runSupportCheck(question, parsed.answer(), accepted, repoRoot);
+        if (support.flagged() && supportChecker.rejectOnUnsupported()) {
+            log.warn("③ 层判定为不支持，按拒答处理（readcodeai.verify.support-check=reject）：{}", support.reason());
+            return new AskAnswer(null, accepted, true,
+                    "证据通过了磁盘核验，但未通过 ③ 层判定（证据不支持结论）：" + support.reason(),
+                    AnsweredBy.LLM, retrievedFrom, hits.size(), selected.size(),
+                    completion.promptTokens(), completion.completionTokens(), elapsedMillis(start),
+                    VerificationSummary.of(accepted.size(), firstPass.failed(), repairs, "判成不支持并拒答")
+                            .withSupport(support));
+        }
+
         return new AskAnswer(parsed.answer(), accepted, false, null, AnsweredBy.LLM,
                 retrievedFrom, hits.size(), selected.size(),
                 completion.promptTokens(), completion.completionTokens(), elapsedMillis(start),
-                new VerificationSummary(accepted.size(), firstPass.failed(), repairs));
+                new VerificationSummary(accepted.size(), firstPass.failed(), repairs, support));
+    }
+
+    /**
+     * ③ 层判定的统一入口：**核验器自己崩了也不能让这次问答失败**。
+     *
+     * <p>崩了记成 {@link SupportCheck.Status#UNAVAILABLE}（= 这次没核验成），
+     * 而不是"通过"也不是"拒绝" —— 前两层已经证明了证据真实存在，那个结果不该被一次判定故障抹掉。
+     */
+    private SupportCheck runSupportCheck(String question, String answer, List<AskEvidence> evidence,
+                                         Path repoRoot) {
+        try {
+            return supportChecker.check(question, answer, evidence, repoRoot);
+        } catch (RuntimeException e) {
+            log.warn("③ 层核验器异常（按「未完成」记录，不影响本次回答）：{}", e.toString());
+            return SupportCheck.unavailable("核验器异常（" + e.getClass().getSimpleName() + "）");
+        }
     }
 
     /**
@@ -313,9 +359,12 @@ public class AnswerService {
         }
 
         List<String> origins = accepted.stream().map(AskEvidence::location).toList();
+        // 静态路线不做 ③ 层判定：答案本身就是查询结果，没有"模型组织语言"这一步，
+        // 也就没有"结论与证据对不上"的可能 —— 那正是 ③ 层要防的东西
         return new AskAnswer(answer, accepted, false, null, AnsweredBy.STATIC,
                 origins, 0, 0, 0, 0, latencyMs,
-                new VerificationSummary(accepted.size(), report.failed(), List.of()));
+                VerificationSummary.of(accepted.size(), report.failed(), List.of(),
+                        "静态路线：答案由查询算出，不经模型组织"));
     }
 
     /** 静态路线里「指向某个符号」的证据：行号来自索引，片段留空（内容核验交给 ① 层）。 */

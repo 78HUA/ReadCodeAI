@@ -243,7 +243,7 @@ class AgentLoopTest {
     // ---- helpers ----
 
     private AgentLoop loopWith(LlmClient client) {
-        return new AgentLoop(toolRegistry, evidenceVerifier, client);
+        return new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, client);
     }
 
     private static BudgetGuard budget(int rounds) {

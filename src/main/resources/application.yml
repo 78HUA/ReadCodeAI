@@ -57,6 +57,10 @@ readcodeai:
     # 答案缓存：同一个问题（同一份索引）第二次问时直接给上次的结果，不再花 10—40 秒与几千 token
     enabled: ${READCODEAI_CACHE_ENABLED:true}
     answer-ttl-minutes: 1440
+  verify:
+    # ③ 层核验（这段代码**支持**这条结论吗）—— ①② 层是程序化比对，不受这里影响、也关不掉
+    # off = 不判定；mark = 判定并把"不支持"标出来（默认：判定会有误伤，不该因此丢掉整条答案）；reject = 判成不支持就拒答
+    support-check: ${READCODEAI_SUPPORT_CHECK:mark}
   retrieve:
     top-k: 8
     # 不把整个仓库塞进上下文

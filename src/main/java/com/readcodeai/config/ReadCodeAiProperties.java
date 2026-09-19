@@ -13,6 +13,7 @@ public class ReadCodeAiProperties {
     private final Index index = new Index();
     private final Retrieve retrieve = new Retrieve();
     private final Cache cache = new Cache();
+    private final Verify verify = new Verify();
 
     /** 启动时校验，非法值当场失败 —— 预算参数写错要到运行时才暴露，代价太大。 */
     @PostConstruct
@@ -21,6 +22,7 @@ public class ReadCodeAiProperties {
         index.validate();
         retrieve.validate();
         cache.validate();
+        verify.validate();
     }
 
     public Llm getLlm() {
@@ -37,6 +39,50 @@ public class ReadCodeAiProperties {
 
     public Cache getCache() {
         return cache;
+    }
+
+    public Verify getVerify() {
+        return verify;
+    }
+
+    /**
+     * 证据校验里唯一需要模型的那一层（③：这段代码**支持**这条结论吗）。
+     *
+     * <p>①② 层（文件行号有效性、片段与磁盘一致）是程序化比对、零成本，不受这里影响、也没法关。
+     * 这一层因为要额外调一次模型，默认做成「标记」而不是「拒答」—— 理由与实测数字见
+     * {@link com.readcodeai.agent.model.SupportCheck}。
+     */
+    public static class Verify {
+
+        public enum Mode {
+            /** 不做判定：省一次模型调用，①② 层照常 */
+            OFF,
+            /** 做判定，判成"不支持"时**保留答案并显著标出**（默认：判定会有误伤，不该把好答案丢掉） */
+            MARK,
+            /** 做判定，判成"不支持"时拒答（更严格，代价是误伤直接变成丢答案） */
+            REJECT
+        }
+
+        private Mode supportCheck = Mode.MARK;
+
+        void validate() {
+            if (supportCheck == null) {
+                throw new IllegalStateException("readcodeai.verify.support-check 只能是 off / mark / reject");
+            }
+        }
+
+        public Mode getSupportCheck() {
+            return supportCheck;
+        }
+
+        public void setSupportCheck(Mode supportCheck) {
+            this.supportCheck = supportCheck;
+        }
+
+        /** 判定完成、但结论不被支持时，要不要按拒答处理。 */
+        public boolean rejectOnUnsupported() {
+            return supportCheck == Mode.REJECT;
+        }
     }
 
     /**

@@ -59,6 +59,17 @@ function openEvidence(evidence) {
   }
 }
 
+// ③ 层核验的结果（这段代码**支持**这条结论吗）。
+// 老接口的响应里没有这一项，所以给一个兜底 —— 界面不能因为少一个字段就报错。
+function support(entry) {
+  return (entry.answer && entry.answer.verification && entry.answer.verification.support) || {
+    status: 'NOT_CHECKED',
+    reason: '',
+    promptTokens: 0,
+    completionTokens: 0
+  }
+}
+
 function answerOf(entry) {
   return entry.answer
 }
@@ -123,6 +134,21 @@ function isRefusal(entry) {
         <p style="margin: 0 0 6px; white-space: pre-wrap">{{ entry.answer.answer }}</p>
       </div>
 
+      <!-- ③ 层核验：前两层只能证明"这几行真实存在"，证明不了"这几行说的就是结论说的那件事" -->
+      <p v-if="support(entry).status === 'UNSUPPORTED'" class="notice">
+        <strong>这些证据可能不支持这条结论</strong>（③ 层核验）：{{ support(entry).reason }}<br />
+        <span class="small">
+          证据通过了磁盘核验（文件、行号、片段都对得上），但核验判定它与结论不是同一件事 ——
+          这类错位是程序化校验拦不住的那一类，请点开证据自己看一眼。
+        </span>
+      </p>
+      <p v-else-if="support(entry).status === 'UNAVAILABLE'" class="notice info small">
+        ③ 层核验没做成（{{ support(entry).reason }}）—— 这只说明**这次没核验**，不代表结论有问题。
+      </p>
+      <p v-else-if="support(entry).status === 'UNCERTAIN'" class="notice info small">
+        ③ 层核验判定材料不足以判断结论是否被支持：{{ support(entry).reason }}
+      </p>
+
       <template v-if="entry.answer.evidence && entry.answer.evidence.length">
         <h3>证据（{{ entry.answer.evidence.length }} 条，全部通过磁盘核验）</h3>
         <div v-for="(evidence, i) in entry.answer.evidence" :key="i" class="evidence">
@@ -147,10 +173,17 @@ function isRefusal(entry) {
         </span>
         <span class="badge plain">模式 {{ entry.answer.mode }}</span>
         <span class="badge plain">终止：{{ entry.answer.stopReason }}</span>
+        <span v-if="support(entry).status === 'SUPPORTED'" class="badge ok">③ 层核验：证据支持结论</span>
+        <span v-else-if="support(entry).status === 'UNSUPPORTED'" class="badge err">③ 层核验：证据不支持结论</span>
+        <span v-else-if="support(entry).status === 'UNCERTAIN'" class="badge warn">③ 层核验：判不了</span>
+        <span v-else-if="support(entry).status === 'UNAVAILABLE'" class="badge warn">③ 层核验未完成</span>
         <span v-if="entry.answer.rounds">轮次 {{ entry.answer.rounds }}</span>
         <span v-if="entry.answer.toolCalls">跳数 {{ entry.answer.toolCalls }}</span>
         <span v-if="entry.answer.repeatedCalls">重复调用被拦 {{ entry.answer.repeatedCalls }} 次</span>
         <span>token {{ formatNumber(entry.answer.promptTokens + entry.answer.completionTokens) }}</span>
+        <span v-if="support(entry).promptTokens + support(entry).completionTokens">
+          核验另花 {{ formatNumber(support(entry).promptTokens + support(entry).completionTokens) }} token
+        </span>
         <span>耗时 {{ formatMs(entry.answer.latencyMs) }}</span>
         <span v-if="entry.answer.estimatedCost">估算成本 ¥{{ entry.answer.estimatedCost.toFixed(4) }}</span>
       </p>

@@ -2,6 +2,7 @@ package com.readcodeai.agent;
 
 import com.readcodeai.config.LlmClient;
 import com.readcodeai.evidence.EvidenceVerifier;
+import com.readcodeai.evidence.SupportChecker;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -17,7 +18,8 @@ import org.springframework.context.annotation.Configuration;
 public class AgentConfig {
 
     @Bean
-    AgentLoop agentLoop(ToolRegistry toolRegistry, EvidenceVerifier evidenceVerifier, LlmClient llmClient) {
-        return new AgentLoop(toolRegistry, evidenceVerifier, llmClient);
+    AgentLoop agentLoop(ToolRegistry toolRegistry, EvidenceVerifier evidenceVerifier,
+                        SupportChecker supportChecker, LlmClient llmClient) {
+        return new AgentLoop(toolRegistry, evidenceVerifier, supportChecker, llmClient);
     }
 }

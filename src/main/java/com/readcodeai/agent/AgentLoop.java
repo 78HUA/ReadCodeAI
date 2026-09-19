@@ -6,12 +6,14 @@ import com.readcodeai.agent.model.AgentStep;
 import com.readcodeai.agent.model.AnsweredBy;
 import com.readcodeai.agent.model.AskEvidence;
 import com.readcodeai.agent.model.StopReason;
+import com.readcodeai.agent.model.SupportCheck;
 import com.readcodeai.agent.model.VerificationSummary;
 import com.readcodeai.agent.tools.ToolContext;
 import com.readcodeai.agent.tools.ToolResult;
 import com.readcodeai.config.BudgetGuard;
 import com.readcodeai.config.LlmClient;
 import com.readcodeai.evidence.EvidenceVerifier;
+import com.readcodeai.evidence.SupportChecker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -73,11 +75,14 @@ public class AgentLoop {
 
     private final ToolRegistry toolRegistry;
     private final EvidenceVerifier evidenceVerifier;
+    private final SupportChecker supportChecker;
     private final LlmClient llmClient;
 
-    public AgentLoop(ToolRegistry toolRegistry, EvidenceVerifier evidenceVerifier, LlmClient llmClient) {
+    public AgentLoop(ToolRegistry toolRegistry, EvidenceVerifier evidenceVerifier,
+                     SupportChecker supportChecker, LlmClient llmClient) {
         this.toolRegistry = toolRegistry;
         this.evidenceVerifier = evidenceVerifier;
+        this.supportChecker = supportChecker;
         this.llmClient = llmClient;
     }
 
@@ -263,13 +268,35 @@ public class AgentLoop {
             log.info("多跳完成：{} 轮 · {} 跳（重复 {} 次）· 证据 {}/{} 条通过核验",
                     budget.usage().rounds(), budget.usage().toolCalls(), budget.usage().repeatedCalls(),
                     accepted.size(), cited.size());
+
+            // ---- ③ 层：这段代码**支持**这条结论吗 ----
+            // 前两层证明的是"这几行真实存在、模型也是从给它的材料里引的"，
+            // 证明不了"这几行说的就是结论说的那件事" —— 实测撞到过最贵的一类错误，
+            // 只有这一层能发现（见 SupportCheck 的注释）。
+            SupportCheck support = runSupportCheck(question, finalAnswer.answer(), accepted, repoRoot);
+            if (support.flagged() && supportChecker.rejectOnUnsupported()) {
+                log.warn("③ 层判定为不支持，按拒答处理（readcodeai.verify.support-check=reject）：{}",
+                        support.reason());
+                // 拒答但**把被引的证据一并交出**：使用者要能自己看一眼，判官凭什么说它不支持
+                return new AgentAnswer(null, accepted, true,
+                        "证据通过了磁盘核验，但 ③ 层判定它不支持这条结论：" + support.reason(),
+                        AnsweredBy.LLM, AgentMode.MULTI_HOP, steps, budget.usage().rounds(),
+                        budget.usage().toolCalls(), budget.usage().repeatedCalls(),
+                        StopReason.SUPPORT_REJECTED,
+                        (int) budget.usage().promptTokens(), (int) budget.usage().completionTokens(),
+                        budget.usage().estimatedCost(), elapsedMillis(startNanos),
+                        new VerificationSummary(accepted.size(), report.failed(), List.of(), support),
+                        false, null);
+            }
+
             return new AgentAnswer(finalAnswer.answer(), accepted, false, null, AnsweredBy.LLM,
                     AgentMode.MULTI_HOP, steps, budget.usage().rounds(), budget.usage().toolCalls(),
                     budget.usage().repeatedCalls(), StopReason.FINAL,
                     (int) budget.usage().promptTokens(), (int) budget.usage().completionTokens(),
                     budget.usage().estimatedCost(), elapsedMillis(startNanos),
                     new VerificationSummary(accepted.size(), report.failed(),
-                            corrections > 0 ? List.of("按核验失败提示重发过一次结论") : List.of()),
+                            corrections > 0 ? List.of("按核验失败提示重发过一次结论") : List.of(),
+                            support),
                     false, null);
         }
 
@@ -285,6 +312,22 @@ public class AgentLoop {
                 stop, (int) budget.usage().promptTokens(), (int) budget.usage().completionTokens(),
                 budget.usage().estimatedCost(), elapsedMillis(startNanos), VerificationSummary.none(),
                 false, null);
+    }
+
+    /**
+     * ③ 层判定的统一入口（与单跳路径同一套兜底）：**核验器自己崩了不能让这次问答失败**。
+     *
+     * <p>崩了记成"这次没核验成"，而前两层已经证明了证据真实存在 ——
+     * 那个结论不该被一次判定故障抹掉。
+     */
+    private SupportCheck runSupportCheck(String question, String answer, List<AskEvidence> evidence,
+                                         Path repoRoot) {
+        try {
+            return supportChecker.check(question, answer, evidence, repoRoot);
+        } catch (RuntimeException e) {
+            log.warn("③ 层核验器异常（按「未完成」记录，不影响本次回答）：{}", e.toString());
+            return SupportCheck.unavailable("核验器异常（" + e.getClass().getSimpleName() + "）");
+        }
     }
 
     private static StopReason budgetStopReason(BudgetGuard budget) {

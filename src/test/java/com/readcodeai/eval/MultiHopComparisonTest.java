@@ -122,7 +122,7 @@ class MultiHopComparisonTest {
                     question.target().startLine(), question.target().endLine(), null));
         }
         return new AgentService(answerService,
-                new AgentLoop(toolRegistry, evidenceVerifier, ScriptedLlmClient.lines(lines.toArray(String[]::new))),
+                new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, ScriptedLlmClient.lines(lines.toArray(String[]::new))),
                 queryRouter, queries, ScriptedLlmClient.lines(lines.toArray(String[]::new)),
                 new com.readcodeai.agent.cache.NoopAnswerCache("对比实验不用缓存（每轮都真跑）"), properties);
     }

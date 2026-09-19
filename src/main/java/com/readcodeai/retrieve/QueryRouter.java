@@ -44,7 +44,7 @@ public class QueryRouter {
         }
     }
 
-    public record Routed(Route route, List<SymbolView> targets) {
+    public record Routed(Route route, List<SymbolView> targets, String question) {
 
         public boolean isDeterministic() {
             return route.isDeterministic() && !targets.isEmpty();
@@ -89,7 +89,8 @@ public class QueryRouter {
         List<String> candidates = identifierCandidates(question);
         List<SymbolView> targets = resolveTargets(route, candidates, lookup);
         // 目标符号找不到就退回语义检索 —— 路由不到具体符号时，确定性查询无从下手
-        return new Routed(targets.isEmpty() && route.isDeterministic() ? Route.SEMANTIC : route, targets);
+        return new Routed(targets.isEmpty() && route.isDeterministic() ? Route.SEMANTIC : route,
+                targets, question);
     }
 
     /** 按「问法」判断路线；判断不了的走语义检索。 */

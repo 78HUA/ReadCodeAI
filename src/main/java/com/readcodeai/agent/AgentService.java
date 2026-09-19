@@ -92,6 +92,8 @@ public class AgentService {
         // scopePath / topK 是多跳里用不上的旋钮：检索范围由模型自己决定，手动限定反而会把它框死
         return agentLoop.run(effectiveRepoId, repoRoot, question, seedObservations(routed),
                 BudgetGuard.of(properties));
+        // 注：种子把目标符号的定义行一并交给模型（seedObservations 里同时返回位置），
+        // 因此"引用目标自身的定义"是有据可依的，不会被"引用必须落在轨迹里"这条规则误杀。
     }
 
     /**
@@ -100,9 +102,9 @@ public class AgentService {
      * <p>这不是提示词工程，而是分工：符号解析是确定性的活（能算准），
      * 让模型从算准的位置起步，既省一轮预算，也避免它去猜"问题里说的是哪个同名方法"。
      */
-    private static List<String> seedObservations(QueryRouter.Routed routed) {
+    private static AgentLoop.Seeds seedObservations(QueryRouter.Routed routed) {
         if (routed.targets().isEmpty()) {
-            return List.of();
+            return AgentLoop.Seeds.none();
         }
         List<String> seeds = new ArrayList<>();
         StringBuilder seed = new StringBuilder("[第 0 跳 · 系统] 确定性路由已把问题里的符号解析出来，可以直接对它用工具：\n");
@@ -111,6 +113,10 @@ public class AgentService {
                     .append("  (").append(target.location()).append(")\n");
         }
         seeds.add(seed.toString());
-        return seeds;
+        List<com.readcodeai.agent.model.AskEvidence> locations = routed.targets().stream()
+                .map(target -> new com.readcodeai.agent.model.AskEvidence(target.filePath(),
+                        target.startLine(), target.endLine(), "", "确定性路由解析出的符号"))
+                .toList();
+        return AgentLoop.Seeds.of(seeds, locations);
     }
 }

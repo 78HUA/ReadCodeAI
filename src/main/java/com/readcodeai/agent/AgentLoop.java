@@ -85,12 +85,12 @@ public class AgentLoop {
      * @param seeds 确定性路由给出的已知线索（第 0 跳）。它让模型不必再花一轮去"猜问题里的符号是哪个"，
      *              也顺带展示了确定性层与模型层的分工：**能算准的先算，模型从算准的地方起步**
      */
-    public AgentAnswer run(long repoId, Path repoRoot, String question, List<String> seeds,
+    public AgentAnswer run(long repoId, Path repoRoot, String question, Seeds seeds,
                            BudgetGuard budget) {
         long startNanos = System.nanoTime();
         ToolContext context = new ToolContext(repoId, repoRoot);
         List<AgentStep> steps = new ArrayList<>();
-        List<String> transcript = new ArrayList<>(seeds);
+        List<String> transcript = new ArrayList<>(seeds.lines());
         VisitedEdgeSet visited = new VisitedEdgeSet();
         // 轨迹状态：看到过的符号 vs 已经查过的符号。两者之差就是「还没走的路」——
         // 模型绕圈时把它算出来甩给模型，比只说一句"你重复了"有用得多（实测模型真的需要这一步）
@@ -229,6 +229,24 @@ public class AgentLoop {
                     .map(EvidenceVerifier.VerifiedEvidence::evidence)
                     .collect(Collectors.toCollection(ArrayList::new));
 
+            // 第二道：**引用必须落在本次轨迹给过的位置里**。
+            // ①②层只能证明"这几行真的存在"，证明不了"模型是从给它的材料里引的" ——
+            // 实测撞到过：模型把结论挂在一个它从没查过的位置上（例如整个类的声明行），
+            // 文件行号都有效，所以前两层一路放行，但那条证据其实没有任何依据。
+            List<AskEvidence> grounded = new ArrayList<>();
+            List<String> ungrounded = new ArrayList<>();
+            for (AskEvidence evidence : accepted) {
+                if (coveredByLocation(seeds.evidence(), evidence) || coveredByTrail(steps, evidence)) {
+                    grounded.add(evidence);
+                } else {
+                    ungrounded.add(evidence.location());
+                }
+            }
+            if (!ungrounded.isEmpty()) {
+                log.warn("结论里有 {} 条证据不在本次轨迹给过的范围内：{}", ungrounded.size(), ungrounded);
+            }
+            accepted = grounded;
+
             if (accepted.isEmpty()) {
                 if (corrections < MAX_VERIFICATION_CORRECTIONS && budget.canContinue()) {
                     corrections++;
@@ -274,6 +292,23 @@ public class AgentLoop {
             case TOKENS -> StopReason.BUDGET_TOKENS;
             case COST -> StopReason.BUDGET_COST;
         };
+    }
+
+    /**
+     * 第 0 跳的线索：给模型看的文字，**加上它因此看到的位置**。
+     *
+     * <p>后者是用来判"引用有没有依据"的：种子把目标符号的定义行交到模型手上，
+     * 那它引用这个定义就是有据可依 —— 不把这部分算进去，会把合法引用误杀。
+     */
+    public record Seeds(List<String> lines, List<AskEvidence> evidence) {
+
+        public static Seeds none() {
+            return new Seeds(List.of(), List.of());
+        }
+
+        public static Seeds of(List<String> lines, List<AskEvidence> evidence) {
+            return new Seeds(lines, evidence);
+        }
     }
 
     private static List<AskEvidence> trailEvidence(List<AgentStep> steps) {
@@ -347,6 +382,32 @@ public class AgentLoop {
         }
         return "还没查过的上游有：" + String.join("、", options)
                 + " —— 对其中一个继续 findCallers，或者直接给结论。" + CONCLUSION_EXAMPLE;
+    }
+
+    /**
+     * 这条引用有没有落在本次轨迹给过的位置里（被某个工具返回的区间**包含**）。
+     *
+     * <p>这就是单跳路径里那条"模型只能引用给它的片段"的规矩，在多跳里同样是防幻觉的第一道闸门 ——
+     * 而且它比磁盘核验更早生效：磁盘核验管"这一行存不存在"，它管"这句话是不是有据可依"。
+     */
+    private static boolean coveredByTrail(List<AgentStep> steps, AskEvidence evidence) {
+        for (AgentStep step : steps) {
+            if (coveredByLocation(step.evidence(), evidence)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean coveredByLocation(List<AskEvidence> given, AskEvidence evidence) {
+        for (AskEvidence item : given) {
+            if (item.file().equals(evidence.file())
+                    && item.startLine() <= evidence.startLine()
+                    && item.endLine() >= evidence.endLine()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** 把核验失败的原因说清楚 —— 模型据此**定向修正**（哪一行对不上），而不是盲目重试一遍。 */

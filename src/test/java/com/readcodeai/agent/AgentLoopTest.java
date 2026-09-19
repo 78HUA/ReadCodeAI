@@ -77,7 +77,7 @@ class AgentLoopTest {
 
         AgentAnswer answer = loopWith(ScriptedLlmClient.lines(script))
                 .run(repo.id(), root(repo), "有哪些方法最终会调用 " + target.qualifiedName() + "？",
-                        List.of(), budget(plan.size() + 3));
+                        seedsOf(target), budget(plan.size() + 3));
 
         System.out.printf("%n[离线多跳] 计划 %d 跳 · 实际 %d 跳 · 轮次 %d · 终止 %s · 发现 %d 个上游符号 · 证据 %d 条通过核验%n",
                 plan.size() + 1, answer.toolCalls(), answer.rounds(), answer.stopReason(),
@@ -105,7 +105,7 @@ class AgentLoopTest {
         AgentAnswer answer = loopWith(ScriptedLlmClient.lines(call, call,
                 ScriptedLlmClient.answer("查到上游后收工", target.filePath(),
                         target.startLine(), target.endLine(), null)))
-                .run(repo.id(), root(repo), "谁调用了它", List.of(), budget(5));
+                .run(repo.id(), root(repo), "谁调用了它", seedsOf(target), budget(5));
 
         List<AgentStep> steps = answer.steps();
         assertThat(steps).as("两次工具轮（一次执行、一次被拦下）").hasSize(2);
@@ -123,7 +123,7 @@ class AgentLoopTest {
         String call = ScriptedLlmClient.callTool("findCallers", "symbol", target.qualifiedName());
 
         AgentAnswer answer = loopWith(ScriptedLlmClient.lines(call, call, call, call))
-                .run(repo.id(), root(repo), "谁调用了它", List.of(), budget(10));
+                .run(repo.id(), root(repo), "谁调用了它", AgentLoop.Seeds.none(), budget(10));
 
         assertThat(answer.refused()).isTrue();
         assertThat(answer.stopReason()).isEqualTo(StopReason.NO_PROGRESS);
@@ -146,7 +146,7 @@ class AgentLoopTest {
 
         // 轮次上限 5：前 3 轮真查，第 4 轮**留给结论**（模型却还在要求查工具）→ 直接停机
         AgentAnswer answer = loopWith(ScriptedLlmClient.lines(script))
-                .run(repo.id(), root(repo), "完整调用链", List.of(), budget(5));
+                .run(repo.id(), root(repo), "完整调用链", AgentLoop.Seeds.none(), budget(5));
 
         assertThat(answer.refused()).isTrue();
         assertThat(answer.stopReason()).isEqualTo(StopReason.BUDGET_ROUNDS);
@@ -171,7 +171,7 @@ class AgentLoopTest {
                 .withTokenUsage(1_000, 0);
         BudgetGuard budget = new BudgetGuard(10, 60_000, 2_500, 100, 0, 0);
 
-        AgentAnswer answer = loopWith(client).run(repo.id(), root(repo), "完整调用链", List.of(), budget);
+        AgentAnswer answer = loopWith(client).run(repo.id(), root(repo), "完整调用链", AgentLoop.Seeds.none(), budget);
 
         assertThat(answer.stopReason()).isEqualTo(StopReason.BUDGET_TOKENS);
         assertThat(answer.rounds()).as("每次 1000 token、上限 2500 → 第 3 次之后触顶").isEqualTo(3);
@@ -184,7 +184,7 @@ class AgentLoopTest {
         AgentAnswer answer = loopWith(ScriptedLlmClient.lines(
                 ScriptedLlmClient.answer("我编的", "src/does/not/Exist.java", 1, 2, "public void nope()"),
                 ScriptedLlmClient.answer("我还是编的", "src/does/not/Exist.java", 1, 2, "public void nope()")))
-                .run(repo.id(), root(repo), "随便问问", List.of(), budget(5));
+                .run(repo.id(), root(repo), "随便问问", AgentLoop.Seeds.none(), budget(5));
 
         assertThat(answer.refused()).isTrue();
         assertThat(answer.stopReason()).isEqualTo(StopReason.EVIDENCE_REJECTED);
@@ -194,13 +194,32 @@ class AgentLoopTest {
     }
 
     @Test
+    void rejectsACitationThatWasNeverShownToTheModel() {
+        // ①②层只能证明"这几行真的存在"，证明不了"模型是从给它的材料里引的"。
+        // 实测撞到过：模型把结论挂在整类的声明行上（文件行号都有效），而那行从没出现在轨迹里。
+        RepoView repo = corpus();
+        SymbolView target = firstWithCallers(repo.id());
+        String call = ScriptedLlmClient.callTool("findCallers", "symbol", target.qualifiedName());
+
+        // 引一个真实存在、但**轨迹里没给过**的位置：目标类所在文件的第 1 行
+        AgentAnswer answer = loopWith(ScriptedLlmClient.lines(call,
+                ScriptedLlmClient.answer("引用没给过的位置", target.filePath(), 1, 1, null),
+                ScriptedLlmClient.answer("再引一次同样的位置", target.filePath(), 1, 1, null)))
+                .run(repo.id(), root(repo), "谁调用了它", AgentLoop.Seeds.none(), budget(6));
+
+        assertThat(answer.refused()).as("无依据的引用不许出现在结论里").isTrue();
+        assertThat(answer.stopReason()).isEqualTo(StopReason.EVIDENCE_REJECTED);
+        assertThat(answer.reason()).contains("核验");
+    }
+
+    @Test
     void survivesGarbageFromTheModelWithoutCrashing() {
         RepoView repo = corpus();
 
         AgentAnswer answer = loopWith(ScriptedLlmClient.lines(
                 "抱歉，我不能这么做。",
                 "总之就是不能。" + System.lineSeparator() + "真的不能。"))
-                .run(repo.id(), root(repo), "随便问问", List.of(), budget(5));
+                .run(repo.id(), root(repo), "随便问问", AgentLoop.Seeds.none(), budget(5));
 
         assertThat(answer.refused()).isTrue();
         assertThat(answer.stopReason()).isEqualTo(StopReason.FORMAT_ERROR);
@@ -214,7 +233,7 @@ class AgentLoopTest {
 
         AgentAnswer answer = loopWith(ScriptedLlmClient.lines(
                 "{\"thought\":\"够了\",\"final\":{\"answer\":\"我觉得是这样\",\"evidence\":[],\"refused\":false}}"))
-                .run(repo.id(), root(repo), "随便问问", List.of(), budget(5));
+                .run(repo.id(), root(repo), "随便问问", AgentLoop.Seeds.none(), budget(5));
 
         assertThat(answer.refused()).isTrue();
         assertThat(answer.stopReason()).isEqualTo(StopReason.NO_EVIDENCE);
@@ -233,6 +252,14 @@ class AgentLoopTest {
 
     private static Path root(RepoView repo) {
         return Path.of(repo.rootPath());
+    }
+
+    /** 与生产路径一致：种子把目标符号的定义位置一并交出去，所以引用它算"有依据"。 */
+    private static AgentLoop.Seeds seedsOf(SymbolView target) {
+        return AgentLoop.Seeds.of(
+                List.of("[第 0 跳 · 系统] 确定性路由已把问题里的符号解析出来：" + target.qualifiedName()),
+                List.of(new com.readcodeai.agent.model.AskEvidence(target.filePath(),
+                        target.startLine(), target.endLine(), "", "确定性路由解析出的符号")));
     }
 
     private static String[] concat(String[] first, String... more) {

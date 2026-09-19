@@ -10,6 +10,12 @@ spring:
     init:
       # schema.sql 全部是 CREATE TABLE IF NOT EXISTS，重复启动安全
       mode: always
+  servlet:
+    multipart:
+      # 上传压缩包：真正的上限在 ProjectIndexer.MAX_UPLOAD_BYTES（那里会给出人话的错误），
+      # 这里只是别让容器更早拒掉请求
+      max-file-size: 200MB
+      max-request-size: 210MB
 
 server:
   port: 8080
@@ -24,7 +30,8 @@ readcodeai:
     model: ${READCODEAI_LLM_MODEL:}
     timeout-seconds: 60
     # 多跳检索的四维预算：轮次 / 时长 / token / 成本，任一超限即停
-    max-rounds: 3
+    # 轮次上限 8 = 最多查 6 跳 + 1 轮结论 + 1 轮保底（**最后一轮留给结论**，模型在这轮要求调工具就停机）
+    max-rounds: 8
     max-duration-ms: 60000
     max-estimated-tokens: 60000
     max-estimated-cost: 0.5

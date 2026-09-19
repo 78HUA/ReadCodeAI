@@ -42,12 +42,21 @@ public class VisitedEdgeSet {
         return normalize(tool).replace("_", "").replace("-", "");
     }
 
-    /** 去空白、转小写、去掉末尾的 {@code ()} —— 只为把同一次查询的几种写法归一。 */
+    /**
+     * 去空白、转小写、去掉末尾的 {@code ()}、把 {@code $} 归一成 {@code .} —— 只为把同一次查询的几种写法归一。
+     *
+     * <p>{@code $} 那一条是**前端实测撞出来的**：模型一会儿写 {@code Outer.Inner}、一会儿写 {@code Outer$Inner}
+     * （同一个嵌套类型在源码与 JVM 里的两种叫法）。不归一的话，同一次查询会被当成两次：
+     * 模型以为自己在"换个方向查"，其实是在原地打转，几轮就被环检测判成绕圈。
+     *
+     * <p>注意 {@code $} 只在**参数**里归一；Java 标识符里合法的 {@code $} 极其罕见，而 {@code A$B} 这种写法
+     * 在跨语言/反射语境里几乎总是嵌套类型 —— 归一的收益远大于风险。
+     */
     static String normalize(String text) {
         if (text == null) {
             return "";
         }
-        String result = text.strip().toLowerCase(Locale.ROOT).replaceAll("\\s+", "");
+        String result = text.strip().toLowerCase(Locale.ROOT).replaceAll("\\s+", "").replace('$', '.');
         while (result.endsWith("()")) {
             result = result.substring(0, result.length() - 2);
         }

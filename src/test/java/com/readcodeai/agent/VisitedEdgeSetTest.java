@@ -21,7 +21,11 @@ class VisitedEdgeSetTest {
         assertThat(visited.firstVisit("findCallers", " R.success ")).as("空白不影响判断").isFalse();
         assertThat(visited.firstVisit("findCallers", "R.error")).as("换了参数就是另一条边").isTrue();
         assertThat(visited.firstVisit("readSymbol", "R.success")).as("换了工具就是另一条边").isTrue();
-        assertThat(visited.size()).isEqualTo(3);
+        // $ 与 . 是同一个嵌套类型的两种叫法（实测撞到过：模型两种都写，同一次查询被算成两次，白烧预算）
+        assertThat(visited.firstVisit("findCallers", "a.b.Outer.Inner#init")).isTrue();
+        assertThat(visited.firstVisit("findCallers", "a.b.Outer$Inner#init"))
+                .as("两种写法必须算同一条边").isFalse();
+        assertThat(visited.size()).isEqualTo(4);
     }
 
     @Test

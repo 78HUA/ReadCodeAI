@@ -42,8 +42,15 @@ public class ReadCodeAiProperties {
         private String model = "";
         private int timeoutSeconds = 60;
 
-        /** 多跳检索的四维预算：轮次 / 时长 / token / 成本，任一超限即停。 */
-        private int maxRounds = 3;
+        /**
+         * 多跳检索的四维预算：轮次 / 时长 / token / 成本，任一超限即停。
+         *
+         * <p><b>注意轮次的算法</b>：最后一轮是留给结论的（模型在这一轮若还要调工具，就直接停机并交出轨迹），
+         * 所以 {@code maxRounds = 8} 实际最多查 6 跳。
+         * 默认值从 3 提到 8 是**前端实测逼出来的**：3 轮意味着只能查 1 跳，
+         * 界面上看着就是"多跳检索没什么用"。
+         */
+        private int maxRounds = 8;
         private long maxDurationMs = 60_000;
         private long maxEstimatedTokens = 60_000;
         private double maxEstimatedCost = 0.5;

@@ -100,6 +100,10 @@ public record RepoSummary(
             boolean available,
             String model,
             String reason,
+            /** 「这个项目是做什么的」一句话 —— 材料来自索引，模型只负责组织语言 */
+            ProjectNote overview,
+            /** 主要功能 3–5 条 */
+            List<ProjectNote> features,
             List<ModuleNote> notes,
             boolean cached,
             java.time.LocalDateTime generatedAt,
@@ -133,7 +137,19 @@ public record RepoSummary(
             boolean verified) {
     }
 
+    /**
+     * 模型写的一句/一段话（项目级）。与 {@link ModuleNote} 同一套核对口径：
+     * 提到的名字要能在索引里找到、自说自话的数字要被标出来。
+     */
+    public record ProjectNote(
+            String text,
+            List<String> mentionedSymbols,
+            List<String> unverifiedSymbols,
+            List<String> numbersInNote,
+            boolean verified) {
+    }
+
     public static Semantics noSemantics(String reason) {
-        return new Semantics(false, null, reason, List.of(), false, null, 0, 0);
+        return new Semantics(false, null, reason, null, List.of(), List.of(), false, null, 0, 0);
     }
 }

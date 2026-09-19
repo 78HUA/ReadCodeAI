@@ -31,7 +31,8 @@ import static org.assertj.core.api.Assumptions.assumeThat;
 class SummaryCacheTest {
 
     private static final String NOTES_JSON = """
-            {"notes":[{"module":"internal","note":"负责内部绑定与类型适配。","mentionedSymbols":[],"unverifiedSymbols":[],"numbersInNote":[],"verified":true}]}
+            {"overview":"一个用于演示的极小 Java 样例项目。","features":["提供问候功能","演示索引流程"],
+             "notes":[{"module":"internal","note":"负责内部绑定与类型适配。","mentionedSymbols":[],"unverifiedSymbols":[],"numbersInNote":[],"verified":true}]}
             """;
 
     @Autowired
@@ -42,6 +43,9 @@ class SummaryCacheTest {
 
     @Autowired
     private ProjectIndexer indexer;
+
+    @Autowired
+    private ProjectMaterialBuilder projectMaterialBuilder;
 
     private Long touchedRepoId;
 
@@ -59,23 +63,30 @@ class SummaryCacheTest {
         touchedRepoId = repo.id();
         repository.deleteSemantics(repo.id());
 
-        ScriptedLlmClient client = ScriptedLlmClient.lines(NOTES_JSON);
+        // 语义现在是**两次调用**（项目一句话 / 模块说明各一次，见 SemanticSummarizer 的注释），
+        // 所以脚本要给两行；同一份 JSON 两份解析器都能吃（字段超集）
+        ScriptedLlmClient client = ScriptedLlmClient.lines(NOTES_JSON, NOTES_JSON, NOTES_JSON, NOTES_JSON);
         RepoSummaryService service = new RepoSummaryService(queries, repository,
-                new SemanticSummarizer(client, repository));
+                new SemanticSummarizer(client, repository), projectMaterialBuilder);
 
         RepoSummary first = service.summarize(repo.id(), true, false);
-        assertThat(client.calls()).as("第一次必须真调模型").isEqualTo(1);
+        assertThat(client.calls()).as("第一次要真调模型（两问各一次）").isEqualTo(2);
         assertThat(first.semantics().available()).isTrue();
         assertThat(first.semantics().cached()).as("第一次是新生成的，不是缓存").isFalse();
         assertThat(first.semantics().notes()).hasSize(1);
+        assertThat(first.semantics().overview()).as("项目级的一句话也要能解析出来")
+                .isNotNull();
+        assertThat(first.semantics().features()).hasSize(2);
 
         RepoSummary second = service.summarize(repo.id(), true, false);
-        assertThat(client.calls()).as("第二次不该再调模型（否则每次看概览都要等十几秒）").isEqualTo(1);
+        assertThat(client.calls()).as("第二次不该再调模型（否则每次看概览都要等十几秒）").isEqualTo(2);
         assertThat(second.semantics().cached()).isTrue();
         assertThat(second.semantics().notes()).isEqualTo(first.semantics().notes());
+        assertThat(second.semantics().overview()).as("缓存要连项目一句话一起存/取")
+                .isEqualTo(first.semantics().overview());
 
         RepoSummary refreshed = service.summarize(repo.id(), true, true);
-        assertThat(client.calls()).as("refresh=true 要强制重新生成").isEqualTo(2);
+        assertThat(client.calls()).as("refresh=true 要强制重新生成（再一次两问）").isEqualTo(4);
         assertThat(refreshed.semantics().cached()).isFalse();
 
         // 结构部分不吃缓存：每次都是现算的（它 83 ms，而且必须新鲜）
@@ -107,7 +118,7 @@ class SummaryCacheTest {
 
         ScriptedLlmClient client = ScriptedLlmClient.lines(NOTES_JSON);
         RepoSummaryService service = new RepoSummaryService(queries, repository,
-                new SemanticSummarizer(client, repository));
+                new SemanticSummarizer(client, repository), projectMaterialBuilder);
 
         RepoSummary summary = service.summarize(repo.id(), false, false);
 

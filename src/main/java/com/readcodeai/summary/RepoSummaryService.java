@@ -64,12 +64,15 @@ public class RepoSummaryService {
     private final SymbolQueryService queries;
     private final SummaryRepository repository;
     private final SemanticSummarizer semanticSummarizer;
+    private final ProjectMaterialBuilder projectMaterialBuilder;
 
     public RepoSummaryService(SymbolQueryService queries, SummaryRepository repository,
-                              SemanticSummarizer semanticSummarizer) {
+                              SemanticSummarizer semanticSummarizer,
+                              ProjectMaterialBuilder projectMaterialBuilder) {
         this.queries = queries;
         this.repository = repository;
         this.semanticSummarizer = semanticSummarizer;
+        this.projectMaterialBuilder = projectMaterialBuilder;
     }
 
     /**
@@ -89,8 +92,12 @@ public class RepoSummaryService {
         RepoView repo = queries.requireRepo(effectiveRepoId);
 
         RepoSummary.Structure structure = buildStructure(repo);
+        // 「这个项目是做什么的」的材料也是**算出来的**（业务对象 / 接口路径 / 核心类），
+        // 与结构部分一起现算；只有把它组织成一句话才交给模型
+        ProjectMaterialBuilder.Material material = projectMaterialBuilder.build(
+                repo, structure.callHubs(), structure.entryPoints(), structure.modulePrefix());
         RepoSummary.Semantics semantics = withSemantics
-                ? semanticsFor(repo, structure, refresh)
+                ? semanticsFor(repo, structure, material, refresh)
                 : RepoSummary.noSemantics("本次请求未要求语义说明（structure 部分不受影响）");
         return new RepoSummary(repo.id(), repo.name(), repo.rootPath(), repo.commitHash(),
                 repo.indexedAt(), structure, semantics);
@@ -108,50 +115,53 @@ public class RepoSummaryService {
      * 重新索引会删掉 repo 行（外键级联清掉缓存），索引时间戳再兜一层。
      */
     private RepoSummary.Semantics semanticsFor(RepoView repo, RepoSummary.Structure structure,
-                                               boolean refresh) {
+                                               ProjectMaterialBuilder.Material material, boolean refresh) {
         if (!semanticSummarizer.available() || repo.indexedAt() == null) {
-            return semanticSummarizer.describe(repo, structure);
+            return semanticSummarizer.describe(repo, structure, material);
         }
         if (!refresh) {
             var cached = repository.findSemantics(repo.id(), repo.indexedAt(), semanticSummarizer.model());
             if (cached.isPresent()) {
-                List<RepoSummary.ModuleNote> notes = readNotes(cached.get().notesJson());
-                if (!notes.isEmpty()) {
+                CachedPayload payload = readPayload(cached.get().notesJson());
+                // 旧缓存（没有项目一句话这一项）按未命中处理：宁可重算一次，也别让界面缺一块
+                if (payload != null && payload.overview() != null) {
                     log.info("摘要语义：命中缓存（生成于 {} · 省下一次模型调用）", cached.get().generatedAt());
-                    return new RepoSummary.Semantics(true, cached.get().model(), null, notes,
+                    return new RepoSummary.Semantics(true, cached.get().model(), null,
+                            payload.overview(), payload.features(), payload.notes(),
                             true, cached.get().generatedAt(),
                             cached.get().promptTokens(), cached.get().completionTokens());
                 }
             }
         }
-        RepoSummary.Semantics generated = semanticSummarizer.describe(repo, structure);
+        RepoSummary.Semantics generated = semanticSummarizer.describe(repo, structure, material);
         if (generated.available()) {
             repository.saveSemantics(repo.id(), repo.indexedAt(), generated.model(),
-                    writeNotes(generated.notes()), generated.promptTokens(), generated.completionTokens());
+                    writePayload(generated), generated.promptTokens(), generated.completionTokens());
             log.info("摘要语义：已缓存（键 = 仓库 {} + 索引 {} + 模型 {}）",
                     repo.id(), repo.indexedAt(), generated.model());
         }
         return generated;
     }
 
-    /** 缓存里存的是「一句话 + 核对结果」的数组；外面裹一层是为了以后加字段不破坏旧数据。 */
-    private record CachedNotes(List<RepoSummary.ModuleNote> notes) {
+    /** 缓存里存的内容：项目一句话 + 主要功能 + 每个模块的说明（都带核对结果）。 */
+    private record CachedPayload(RepoSummary.ProjectNote overview, List<RepoSummary.ProjectNote> features,
+                                 List<RepoSummary.ModuleNote> notes) {
     }
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    private static String writeNotes(List<RepoSummary.ModuleNote> notes) {
-        return JSON.writeValueAsString(new CachedNotes(notes));
+    private static String writePayload(RepoSummary.Semantics semantics) {
+        return JSON.writeValueAsString(new CachedPayload(semantics.overview(),
+                semantics.features() == null ? List.of() : semantics.features(), semantics.notes()));
     }
 
-    private static List<RepoSummary.ModuleNote> readNotes(String json) {
+    private static CachedPayload readPayload(String json) {
         try {
-            CachedNotes parsed = JSON.readValue(json, CachedNotes.class);
-            return parsed == null || parsed.notes() == null ? List.of() : parsed.notes();
+            return JSON.readValue(json, CachedPayload.class);
         } catch (RuntimeException e) {
             // 缓存坏了不该让请求失败：当成没命中，重新生成一次就好
             log.warn("摘要缓存解析失败，按未命中处理：{}", e.getMessage());
-            return List.of();
+            return null;
         }
     }
 

@@ -36,6 +36,28 @@ public class SymbolQueryRepository {
     }
 
     /**
+     * 顶层类型清单（类/接口/枚举/记录）—— 「这个项目是做什么的」的材料来源之一。
+     *
+     * <p>业务对象（entity/domain/model 包下）与控制器（*Controller）都从这份清单里筛，
+     * 用限定名做判断，不必再写一套包名解析。
+     */
+    public List<NamedType> topLevelTypes(long repoId, int limit) {
+        return jdbc.query("""
+                SELECT s.qualified_name, s.name, s.start_line, s.end_line, f.path
+                  FROM `symbol` s JOIN `source_file` f ON f.id = s.file_id
+                 WHERE s.repo_id = ? AND s.parent_id IS NULL
+                   AND s.kind IN ('CLASS','INTERFACE','ENUM','RECORD','ANNOTATION')
+                 ORDER BY s.qualified_name
+                 LIMIT ?
+                """, (rs, rowNum) -> new NamedType(
+                rs.getString("name"), rs.getString("qualified_name"), rs.getString("path"),
+                rs.getInt("start_line"), rs.getInt("end_line")), repoId, limit);
+    }
+
+    public record NamedType(String name, String qualifiedName, String filePath, int startLine, int endLine) {
+    }
+
+    /**
      * 被调用最多的方法 —— 抽查清单与集成测试都从这里取基准，
      * 这样测试**不绑定任何具体项目**，换测试仓库不用改代码。
      */

@@ -52,6 +52,9 @@ class RepoSummaryTest {
     private SemanticSummarizer semanticSummarizer;
 
     @Autowired
+    private ProjectMaterialBuilder projectMaterialBuilder;
+
+    @Autowired
     private SummaryRepository summaryRepository;
 
     @Test
@@ -108,6 +111,31 @@ class RepoSummaryTest {
         // ⑤ 语义部分是关掉的：结构照常完整，可降级在这里也必须成立
         assertThat(summary.semantics().available()).isFalse();
         assertThat(summary.semantics().reason()).contains("未要求");
+    }
+
+    @Test
+    void projectMaterialIsComputedFromTheIndexNotFromTheModel() {
+        RepoView repo = corpus();
+        RepoSummary summary = summaryService.summarize(repo.id(), false);
+        ProjectMaterialBuilder.Material material = projectMaterialBuilder.build(repo,
+                summary.structure().callHubs(), summary.structure().entryPoints(),
+                summary.structure().modulePrefix());
+
+        System.out.printf("%n[项目材料] 业务对象 %d 个：%s%n            控制器 %d 个 · 接口路径 %d 条 · 核心类 %d 个%n",
+                material.domainTypes().size(), material.domainTypes().stream().limit(6).toList(),
+                material.controllers().size(), material.paths().size(), material.hubs().size());
+        if (!material.paths().isEmpty()) {
+            System.out.printf("            路径样例：%s%n", material.paths().stream().limit(8).toList());
+        }
+
+        // 这些名字都必须是索引里真实存在的 —— 它们是"这个项目是做什么的"的依据，
+        // 一旦变成模型编的，整句话就不可核对了
+        assertThat(material.isEmpty()).as("至少该取到业务对象或控制器（否则这句话没有依据）").isFalse();
+        for (String name : material.domainTypes()) {
+            assertThat(queries.locate(repo.id(), name, 20))
+                    .as("业务对象 %s 必须能在索引里找到", name).isNotEmpty();
+        }
+        assertThat(material.describe()).contains("业务对象").contains("接口路径样例");
     }
 
     @Test

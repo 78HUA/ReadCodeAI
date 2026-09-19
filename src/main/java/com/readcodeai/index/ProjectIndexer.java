@@ -60,6 +60,90 @@ public class ProjectIndexer {
         return index(repoRoot, null);
     }
 
+    /** 上传压缩包的大小上限：与 GitHub 源码包同一个量级，够放一个中等仓库。 */
+    public static final long MAX_UPLOAD_BYTES = 200L * 1024 * 1024;
+
+    /**
+     * 索引一个**上传上来的压缩包**。
+     *
+     * <p>三件事在这里一次做完，控制器只管收字节流：
+     * <ol>
+     *   <li>落到工作区（边写边计体积，超限立即中止）</li>
+     *   <li>解压 —— 路径校验与体积上限交给 {@link ZipExtractor}（与远程拉取共用一份）</li>
+     *   <li>索引</li>
+     * </ol>
+     *
+     * <p><b>剥不剥最外层目录要看压缩包本身</b>：压缩包里只有一层目录时剥掉（"把项目文件夹压进去"的常见形态），
+     * 否则原样解压 —— 剥错了会把 {@code src} 当成包装目录扔掉，用户只会看到"索引出 0 个文件"。
+     */
+    public IndexSummary indexArchive(java.io.InputStream zipStream, String originalFilename) {
+        String name = safeArchiveName(originalFilename);
+        Path workspace = Path.of(properties.getIndex().getWorkspace()).resolve("uploads");
+        Path archive = null;
+        try {
+            Files.createDirectories(workspace);
+            archive = Files.createTempFile(workspace, "upload-", ".zip");
+            long copied = copyWithLimit(zipStream, archive);
+            log.info("收到上传压缩包：{}（{} 字节）→ 解压目录 {}", originalFilename, copied, name);
+            Path root = workspace.resolve(name);
+            // 同一个名字重新上传 = 覆盖：先把旧内容清干净，否则索引里会混进上一次的文件
+            ZipExtractor.clearDirectory(root);
+            ZipExtractor.extract(archive, root, ZipExtractor.hasSingleTopLevelDirectory(archive));
+            return index(root);
+        } catch (IOException e) {
+            throw new IllegalStateException("处理上传压缩包失败：" + e.getMessage(), e);
+        } finally {
+            if (archive != null) {
+                try {
+                    Files.deleteIfExists(archive);
+                } catch (IOException e) {
+                    log.warn("清理临时压缩包失败（不影响索引结果）：{}", e.getMessage());
+                }
+            }
+        }
+    }
+
+    /** 删除某个仓库的索引（外键是 CASCADE，子表会跟着删）。 */
+    public boolean deleteIndex(long repoId) {
+        boolean deleted = repository.deleteRepo(repoId);
+        log.info("删除索引：repoId={} · {}", repoId, deleted ? "已删除" : "不存在");
+        return deleted;
+    }
+
+    private static long copyWithLimit(java.io.InputStream in, Path target) throws IOException {
+        long copied = 0;
+        try (java.io.OutputStream out = Files.newOutputStream(target,
+                java.nio.file.StandardOpenOption.TRUNCATE_EXISTING)) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                copied += read;
+                if (copied > MAX_UPLOAD_BYTES) {
+                    throw new IOException("压缩包超过 " + (MAX_UPLOAD_BYTES / 1024 / 1024) + " MB，已中止");
+                }
+                out.write(buffer, 0, read);
+            }
+        }
+        if (copied == 0) {
+            throw new IOException("压缩包是空的");
+        }
+        return copied;
+    }
+
+    /** 压缩包名 → 安全的目录名：只留字母数字与点线，且不带头部的路径分隔符。 */
+    static String safeArchiveName(String originalFilename) {
+        String base = originalFilename == null ? "" : originalFilename.replace('\\', '/');
+        int slash = base.lastIndexOf('/');
+        if (slash >= 0) {
+            base = base.substring(slash + 1);
+        }
+        if (base.toLowerCase().endsWith(".zip")) {
+            base = base.substring(0, base.length() - 4);
+        }
+        String cleaned = base.replaceAll("[^A-Za-z0-9._-]", "-").replaceAll("^-+|-+$", "");
+        return cleaned.isBlank() ? "uploaded-repo" : cleaned;
+    }
+
     /**
      * @param commitHashOverride 远程拉取时带进来的提交号；为 null 时尝试从本地 {@code .git} 读
      */

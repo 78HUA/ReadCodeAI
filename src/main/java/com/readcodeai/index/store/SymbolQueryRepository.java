@@ -137,6 +137,19 @@ public class SymbolQueryRepository {
                 repoId, keyword, "%" + keyword + "%", keyword, keyword, limit);
     }
 
+    /**
+     * 索引时记录的文件内容哈希。
+     *
+     * <p>用途只有一个但很重要：把它与磁盘当前内容的哈希一比，就知道**这个文件在索引之后有没有被改过**
+     * —— 改过就意味着行号可能漂移，界面上必须提示（见 FileContentService）。
+     */
+    public java.util.Optional<String> contentHash(long repoId, String path) {
+        List<String> hashes = jdbc.queryForList("SELECT content_hash FROM `source_file` WHERE repo_id = ? AND path = ?",
+                String.class, repoId, path);
+        return hashes.isEmpty() || hashes.get(0) == null
+                ? java.util.Optional.empty() : java.util.Optional.of(hashes.get(0));
+    }
+
     /** 按 id 取仓库 —— 证据校验需要仓库根路径，才能把「相对路径」还原成磁盘上的真实文件。 */
     public java.util.Optional<RepoView> findRepoById(long repoId) {
         List<RepoView> found = jdbc.query("""

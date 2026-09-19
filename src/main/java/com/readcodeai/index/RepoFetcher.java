@@ -14,13 +14,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.List;
 import java.util.Set;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 
 /**
  * 把 GitHub 仓库拉下来（贴个链接就能用）。
@@ -51,8 +48,8 @@ public class RepoFetcher {
     /** 源码包下载上限 200 MB。 */
     private static final long MAX_ARCHIVE_BYTES = 200L * 1024 * 1024;
 
-    /** 解压后总大小上限 2 GB，防 zip 炸弹。 */
-    private static final long MAX_EXTRACTED_BYTES = 2L * 1024 * 1024 * 1024;
+    /** 解压后总大小上限 2 GB，防 zip 炸弹（与上传入口共用同一份实现，见 {@link ZipExtractor}）。 */
+    private static final long MAX_EXTRACTED_BYTES = ZipExtractor.MAX_EXTRACTED_BYTES;
 
     /**
      * {@code /zip/HEAD} 直接取默认分支最新快照 —— **实测可用**，所以不必先调一次 API 查默认分支。
@@ -81,7 +78,9 @@ public class RepoFetcher {
             Path archive = Files.createTempFile(workspace, ref.repo() + "-", ".zip");
             try {
                 download(ref, archive);
-                Path root = extract(archive, workspace.resolve(ref.repo()));
+                ZipExtractor.clearDirectory(workspace.resolve(ref.repo()));
+                ZipExtractor.extract(archive, workspace.resolve(ref.repo()), true);
+                Path root = workspace.resolve(ref.repo());
                 String commitHash = lookupCommitHash(ref);
                 log.info("已拉取 {} → {}（提交号 {}）", gitUrl, root, commitHash);
                 return new Fetched(gitUrl, ref.owner(), ref.repo(), commitHash, root);
@@ -162,49 +161,6 @@ public class RepoFetcher {
             }
         }
         log.info("源码包下载完成：{} 字节", copied);
-    }
-
-    /**
-     * 解压源码包，剥掉 GitHub 自动加的那层顶层目录（{@code repo-HEAD/}）。
-     *
-     * <p>每个条目都做路径校验：解析后的绝对路径必须仍在目标目录内，否则就是 zip slip 攻击。
-     */
-    private Path extract(Path archive, Path destination) throws IOException {
-        Files.createDirectories(destination);
-        long totalBytes = 0;
-        try (ZipInputStream zip = new ZipInputStream(Files.newInputStream(archive))) {
-            ZipEntry entry;
-            while ((entry = zip.getNextEntry()) != null) {
-                String name = stripTopLevel(entry.getName());
-                if (name == null || name.isBlank()) {
-                    continue;
-                }
-                Path target = destination.resolve(name).normalize();
-                if (!target.startsWith(destination)) {
-                    throw new IOException("源码包里的路径越界（zip slip）：" + entry.getName());
-                }
-                if (entry.isDirectory()) {
-                    Files.createDirectories(target);
-                    continue;
-                }
-                Files.createDirectories(target.getParent());
-                long written = Files.copy(zip, target, StandardCopyOption.REPLACE_EXISTING);
-                totalBytes += written;
-                if (totalBytes > MAX_EXTRACTED_BYTES) {
-                    throw new IOException("解压后体积超过上限，可能是 zip 炸弹，已中止");
-                }
-            }
-        }
-        return destination;
-    }
-
-    /** 去掉第一层目录（{@code gson-HEAD/src/...} → {@code src/...}）。 */
-    static String stripTopLevel(String entryName) {
-        int slash = entryName.indexOf('/');
-        if (slash < 0) {
-            return null;
-        }
-        return entryName.substring(slash + 1);
     }
 
     /**

@@ -89,10 +89,11 @@ class RemoteFetchTest {
 
     @Test
     void stripsTheArchiveTopLevelDirectorySoPathsStayRelativeToTheRepository() {
-        assertThat(RepoFetcher.stripTopLevel("gson-HEAD/")).isEmpty();
-        assertThat(RepoFetcher.stripTopLevel("gson-HEAD/src/main/java/Gson.java"))
+        // 解压逻辑现在由 ZipExtractor 承担（远程源码包与用户上传的压缩包共用同一份安全约束）
+        assertThat(ZipExtractor.stripTopLevel("gson-HEAD/")).isEmpty();
+        assertThat(ZipExtractor.stripTopLevel("gson-HEAD/src/main/java/Gson.java"))
                 .isEqualTo("src/main/java/Gson.java");
         // 没有顶层目录的条目直接丢掉（GitHub 的包一定有，防御性处理）
-        assertThat(RepoFetcher.stripTopLevel("stray-file.txt")).isNull();
+        assertThat(ZipExtractor.stripTopLevel("stray-file.txt")).isNull();
     }
 }

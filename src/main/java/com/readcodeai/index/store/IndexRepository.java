@@ -243,6 +243,11 @@ public class IndexRepository {
                 Timestamp.valueOf(LocalDateTime.now()), repoId);
     }
 
+    /** 删仓库：子表（源文件/符号/调用边/类型关系/chunk/题目/评估记录）都是 ON DELETE CASCADE，会跟着走。 */
+    public boolean deleteRepo(long repoId) {
+        return jdbc.update("DELETE FROM `repo` WHERE id = ?", repoId) > 0;
+    }
+
     public void failRepo(long repoId, String errorMessage) {
         jdbc.update("UPDATE `repo` SET status = 'FAILED', error_msg = ?, indexed_at = ? WHERE id = ?",
                 errorMessage, Timestamp.valueOf(LocalDateTime.now()), repoId);

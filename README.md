@@ -168,7 +168,8 @@ eval/         自动出题与自动判卷
 frontend/     Vue 3 + Vite（构建产物写进 src/main/resources/static/）
 ```
 
-数据库 10 张表：`repo` `source_file` `symbol` `call_edge` `type_relation` `chunk` `question` `eval_run` `answer_log` `repo_summary`。
+数据库 9 张表：`repo` `source_file` `symbol` `call_edge` `type_relation` `chunk` `question` `eval_run` `repo_summary`。
+（设计文档里的第 10 张 `answer_log` —— 用于记录每次问答的 token 与耗时 —— **还没建**，见「已知限制」。）
 调用图**保留解析不出来的调用**（`resolved=0` + 原文 + 原因），把"没解析出来"和"不存在"严格区分开。
 
 ## 设计上的几个取舍
@@ -222,6 +223,8 @@ mvn test -Dreadcodeai.verify.repo=/path/to/a/java/repo
 6. **向量层未实现**：中文提问 ↔ 英文标识符的鸿沟目前靠全文检索兜着。
 7. **重新索引会重建仓库记录**：同一个路径重新索引是"删了再插"，所以 `repoId` 会变 ——
    脚本里别把它当长期稳定标识，每次先 `GET /api/repos` 查一遍。
+8. **问答的用量没有落库**：设计文档里的 `answer_log` 表（记录每次问答的 token、耗时、是否拒答）还没建，
+   所以现在看不到"累计花了多少、拒答率多少"这类指标 —— 指标页展示的是自动评估的结果，不是运行统计。
 
 ## 目录
 

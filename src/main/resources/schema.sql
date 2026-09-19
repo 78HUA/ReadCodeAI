@@ -185,3 +185,20 @@ CREATE TABLE IF NOT EXISTS eval_run
     CONSTRAINT fk_eval_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '评估运行汇总';
+
+-- 10. 摘要缓存：结构每次现算（便宜且要新鲜），模型补的那句语义按「索引版本」缓存
+CREATE TABLE IF NOT EXISTS repo_summary
+(
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    repo_id           BIGINT       NOT NULL,
+    -- 索引版本：索引时间戳变了，缓存即失效。重新索引会删掉 repo 行（外键级联），所以这里是双保险
+    indexed_at        DATETIME     NOT NULL,
+    model             VARCHAR(128) NOT NULL COMMENT '模型名：换模型等于换一份生成结果',
+    notes             JSON         NOT NULL COMMENT '每个模块的一句话 + 核对结果',
+    prompt_tokens     INT          NOT NULL DEFAULT 0,
+    completion_tokens INT          NOT NULL DEFAULT 0,
+    generated_at      DATETIME     NOT NULL,
+    UNIQUE KEY uk_summary_version (repo_id, indexed_at, model),
+    CONSTRAINT fk_summary_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '摘要的语义部分缓存（可重新生成）';

@@ -208,6 +208,54 @@ public class SummaryRepository {
     public record FileScale(String path, int loc, String typeQualifiedName, int symbolCount) {
     }
 
+    // ------------------------------------------------------------------ 语义部分的缓存
+
+    /**
+     * 取缓存：键是 (仓库, **索引版本**, 模型名)。
+     *
+     * <p>为什么键里必须有索引版本：重新索引之后代码已经变了，而"每个模块负责什么"这句话
+     * 是针对旧代码写的。缓存键少了它，就会出现"你刚重新索引进来的代码，配着上一版的说辞" ——
+     * 那比没有缓存更糟。
+     */
+    public java.util.Optional<CachedSemantics> findSemantics(long repoId,
+                                                            java.time.LocalDateTime indexedAt,
+                                                            String model) {
+        List<CachedSemantics> found = jdbc.query("""
+                SELECT model, notes, prompt_tokens, completion_tokens, generated_at
+                  FROM `repo_summary`
+                 WHERE repo_id = ? AND indexed_at = ? AND model = ?
+                """, (rs, rowNum) -> new CachedSemantics(
+                rs.getString("model"), rs.getString("notes"),
+                rs.getInt("prompt_tokens"), rs.getInt("completion_tokens"),
+                rs.getTimestamp("generated_at").toLocalDateTime()),
+                repoId, java.sql.Timestamp.valueOf(indexedAt), model);
+        return found.isEmpty() ? java.util.Optional.empty() : java.util.Optional.of(found.get(0));
+    }
+
+    public void saveSemantics(long repoId, java.time.LocalDateTime indexedAt, String model,
+                              String notesJson, int promptTokens, int completionTokens) {
+        jdbc.update("""
+                INSERT INTO `repo_summary`
+                    (repo_id, indexed_at, model, notes, prompt_tokens, completion_tokens, generated_at)
+                VALUES (?, ?, ?, ?, ?, ?, NOW())
+                ON DUPLICATE KEY UPDATE notes = VALUES(notes), model = VALUES(model),
+                                        prompt_tokens = VALUES(prompt_tokens),
+                                        completion_tokens = VALUES(completion_tokens),
+                                        generated_at = NOW()
+                """, repoId, java.sql.Timestamp.valueOf(indexedAt), model, notesJson,
+                promptTokens, completionTokens);
+    }
+
+    /** 清掉某个仓库的语义缓存（重新生成、或测试收尾用）。 */
+    public int deleteSemantics(long repoId) {
+        return jdbc.update("DELETE FROM `repo_summary` WHERE repo_id = ?", repoId);
+    }
+
+    public record CachedSemantics(String model, String notesJson,
+                                  int promptTokens, int completionTokens,
+                                  java.time.LocalDateTime generatedAt) {
+    }
+
     private static SymbolRef toSymbolRef(ResultSet rs) throws SQLException {
         return new SymbolRef(
                 rs.getLong("id"), rs.getString("kind"), rs.getString("qualified_name"),

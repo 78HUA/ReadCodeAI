@@ -13,17 +13,20 @@ const summary = ref(null)
 const loading = ref(false)
 const error = ref('')
 const drawer = ref(null)
+const regenerating = ref(false)
 
-async function load() {
+async function load(refresh = false) {
   loading.value = true
   error.value = ''
+  if (refresh) regenerating.value = true
   try {
-    summary.value = await api.summary(props.repoId, true)
+    summary.value = await api.summary(props.repoId, true, refresh)
   } catch (e) {
     error.value = e.message
-    summary.value = null
+    if (refresh) summary.value = null
   } finally {
     loading.value = false
+    regenerating.value = false
   }
 }
 
@@ -43,8 +46,8 @@ function openLocation(file, startLine, endLine, title) {
   drawer.value = { file, startLine, endLine, title, why: '' }
 }
 
-watch(() => props.repoId, load, { immediate: true })
-onMounted(load)
+watch(() => props.repoId, () => load(false), { immediate: true })
+onMounted(() => load(false))
 </script>
 
 <template>
@@ -164,6 +167,17 @@ onMounted(load)
     <div class="panel">
       <h3 style="margin-top: 0">每个模块大致负责什么（模型补的）</h3>
       <template v-if="summary.semantics.available">
+        <div class="row" style="margin-bottom: 8px">
+          <span v-if="summary.semantics.cached" class="badge info">
+            这份说明来自缓存（生成于 {{ (summary.semantics.generatedAt || '').replace('T', ' ').slice(0, 19) }}，本次没有调用模型）
+          </span>
+          <span v-else class="badge ok">
+            本次新生成 · 花了 {{ summary.semantics.totalTokens || (summary.semantics.promptTokens + summary.semantics.completionTokens) }} token
+          </span>
+          <button class="ghost" :disabled="regenerating" @click="load(true)">
+            <span v-if="regenerating" class="spinner"></span>{{ regenerating ? '正在重新生成…' : '重新生成' }}
+          </button>
+        </div>
         <p class="hint">
           模型：<span class="mono">{{ summary.semantics.model }}</span> ·
           这句话里提到的符号名都拿去索引里精确查过：**索引里找不到的名字**和它自己写的数字会被标出来

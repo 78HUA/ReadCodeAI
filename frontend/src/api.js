@@ -1,6 +1,10 @@
 // 后端接口的薄封装：只做三件事 —— 拼 URL、统一解 { code, message, data }、把错误原样抛出来。
 // 不做缓存、不做重试：这个前端要展示的正是"后端此刻算出来的东西"。
 
+// 会话内备忘录：只活在当前页面里（刷新即清）。它的作用只有一个 —— 别让来回切页签重复触发模型调用。
+// 后端那一层的缓存键是「仓库 + 索引版本 + 模型名」，比这个严格得多，两者不冲突。
+const summaryMemo = new Map()
+
 async function request(path, options = {}) {
   const response = await fetch(path, {
     headers: options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' },
@@ -31,7 +35,15 @@ export const api = {
   },
   deleteRepo: (id) => request(`/api/repos/${id}`, { method: 'DELETE' }),
 
-  summary: (repoId, semantics = true) => request(`/api/summary?repoId=${repoId}&semantics=${semantics}`),
+  // 摘要：第一次真算，之后同一仓库在**本次会话内**直接复用（切页签不再发请求）。
+  // refresh=true 绕过本地备忘录并请后端重新生成（"重新生成"按钮用它）。
+  summary: async (repoId, semantics = true, refresh = false) => {
+    const key = `${repoId}/${semantics}`
+    if (!refresh && summaryMemo.has(key)) return summaryMemo.get(key)
+    const data = await request(`/api/summary?repoId=${repoId}&semantics=${semantics}&refresh=${refresh}`)
+    summaryMemo.set(key, data)
+    return data
+  },
 
   ask: (repoId, question, mode) =>
     request('/api/agent', { method: 'POST', body: JSON.stringify({ repoId, question, mode }) }),

@@ -20,6 +20,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 
+import tools.jackson.databind.ObjectMapper;
+
 /**
  * 结构化摘要：**能算的部分全部算出来，剩下那一点才交给模型**。
  *
@@ -75,15 +77,82 @@ public class RepoSummaryService {
      *                      没配 Key、或不想花 token 时都能用，这是可降级设计在这一步的体现
      */
     public RepoSummary summarize(Long repoId, boolean withSemantics) {
+        return summarize(repoId, withSemantics, false);
+    }
+
+    /**
+     * @param refresh 强制重新生成语义说明（跳过一次缓存）。界面上那个「重新生成」按钮用它 ——
+     *                缓存必须是**可见、可控**的，否则就成了"偷偷给你旧东西"
+     */
+    public RepoSummary summarize(Long repoId, boolean withSemantics, boolean refresh) {
         long effectiveRepoId = repoId != null ? repoId : queries.requireLatestRepoId();
         RepoView repo = queries.requireRepo(effectiveRepoId);
 
         RepoSummary.Structure structure = buildStructure(repo);
         RepoSummary.Semantics semantics = withSemantics
-                ? semanticSummarizer.describe(repo, structure)
+                ? semanticsFor(repo, structure, refresh)
                 : RepoSummary.noSemantics("本次请求未要求语义说明（structure 部分不受影响）");
         return new RepoSummary(repo.id(), repo.name(), repo.rootPath(), repo.commitHash(),
                 repo.indexedAt(), structure, semantics);
+    }
+
+    /**
+     * 语义那一段：**先查缓存，没有再生成**。
+     *
+     * <h3>为什么只缓存这一段</h3>
+     * 结构部分是查库算出来的，实测 83 ms 且必须新鲜（索引变了它就必须变）—— 缓存它得不偿失。
+     * 而语义那一段是一次真实模型调用（实测 13–15 秒），同一份索引上重复生成纯属浪费。
+     *
+     * <h3>缓存键为什么是「仓库 + 索引版本 + 模型名」</h3>
+     * 少任何一个都会给错东西：换索引 → 说明是给旧代码写的；换模型 → 那是另一次生成的结果。
+     * 重新索引会删掉 repo 行（外键级联清掉缓存），索引时间戳再兜一层。
+     */
+    private RepoSummary.Semantics semanticsFor(RepoView repo, RepoSummary.Structure structure,
+                                               boolean refresh) {
+        if (!semanticSummarizer.available() || repo.indexedAt() == null) {
+            return semanticSummarizer.describe(repo, structure);
+        }
+        if (!refresh) {
+            var cached = repository.findSemantics(repo.id(), repo.indexedAt(), semanticSummarizer.model());
+            if (cached.isPresent()) {
+                List<RepoSummary.ModuleNote> notes = readNotes(cached.get().notesJson());
+                if (!notes.isEmpty()) {
+                    log.info("摘要语义：命中缓存（生成于 {} · 省下一次模型调用）", cached.get().generatedAt());
+                    return new RepoSummary.Semantics(true, cached.get().model(), null, notes,
+                            true, cached.get().generatedAt(),
+                            cached.get().promptTokens(), cached.get().completionTokens());
+                }
+            }
+        }
+        RepoSummary.Semantics generated = semanticSummarizer.describe(repo, structure);
+        if (generated.available()) {
+            repository.saveSemantics(repo.id(), repo.indexedAt(), generated.model(),
+                    writeNotes(generated.notes()), generated.promptTokens(), generated.completionTokens());
+            log.info("摘要语义：已缓存（键 = 仓库 {} + 索引 {} + 模型 {}）",
+                    repo.id(), repo.indexedAt(), generated.model());
+        }
+        return generated;
+    }
+
+    /** 缓存里存的是「一句话 + 核对结果」的数组；外面裹一层是为了以后加字段不破坏旧数据。 */
+    private record CachedNotes(List<RepoSummary.ModuleNote> notes) {
+    }
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    private static String writeNotes(List<RepoSummary.ModuleNote> notes) {
+        return JSON.writeValueAsString(new CachedNotes(notes));
+    }
+
+    private static List<RepoSummary.ModuleNote> readNotes(String json) {
+        try {
+            CachedNotes parsed = JSON.readValue(json, CachedNotes.class);
+            return parsed == null || parsed.notes() == null ? List.of() : parsed.notes();
+        } catch (RuntimeException e) {
+            // 缓存坏了不该让请求失败：当成没命中，重新生成一次就好
+            log.warn("摘要缓存解析失败，按未命中处理：{}", e.getMessage());
+            return List.of();
+        }
     }
 
     RepoSummary.Structure buildStructure(RepoView repo) {

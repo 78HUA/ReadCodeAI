@@ -74,6 +74,16 @@ public class SemanticSummarizer {
         this.repository = repository;
     }
 
+    /** 模型能不能用（结构部分不依赖它，但语义那一段依赖）。 */
+    public boolean available() {
+        return llmClient.available();
+    }
+
+    /** 缓存键要用模型名：换模型等于换一份生成结果。 */
+    public String model() {
+        return llmClient.model();
+    }
+
     public RepoSummary.Semantics describe(RepoView repo, RepoSummary.Structure structure) {
         if (!llmClient.available()) {
             return RepoSummary.noSemantics("未配置 LLM（readcodeai.llm.*）：语义说明不可用；"
@@ -105,9 +115,13 @@ public class SemanticSummarizer {
         }
 
         List<ModuleNote> verified = verify(repo.id(), notes.notes());
-        log.info("摘要语义：{} 个模块有说明 · 其中 {} 个含未核对的符号名",
-                verified.size(), verified.stream().filter(note -> !note.verified()).count());
-        return new RepoSummary.Semantics(true, llmClient.model(), null, verified);
+        // token 用量必须记下来：摘要也是"花了多少"该能报出来的地方（之前这里漏了，补上）
+        log.info("摘要语义：{} 个模块有说明 · 其中 {} 个含未核对的符号名 · prompt {} + completion {} token",
+                verified.size(), verified.stream().filter(note -> !note.verified()).count(),
+                completion.promptTokens(), completion.completionTokens());
+        return new RepoSummary.Semantics(true, llmClient.model(), null, verified,
+                false, java.time.LocalDateTime.now(),
+                completion.promptTokens(), completion.completionTokens());
     }
 
     private String buildPrompt(RepoView repo, RepoSummary.Structure structure) {

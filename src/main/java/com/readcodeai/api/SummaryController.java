@@ -27,19 +27,26 @@ public class SummaryController {
         this.summaryService = summaryService;
     }
 
+    /**
+     * @param semantics 要不要语义说明（关掉它就只返回查库算出来的结构，毫秒级）
+     * @param refresh   强制重新生成语义说明、跳过一次缓存（界面上是「重新生成」按钮）
+     */
     @GetMapping
     public ApiResponse<RepoSummary> summary(@RequestParam(required = false) Long repoId,
-                                            @RequestParam(defaultValue = "true") boolean semantics) {
-        return ApiResponse.ok(summaryService.summarize(repoId, semantics));
+                                            @RequestParam(defaultValue = "true") boolean semantics,
+                                            @RequestParam(defaultValue = "false") boolean refresh) {
+        return ApiResponse.ok(summaryService.summarize(repoId, semantics, refresh));
     }
 
     /** 便于前端用 POST 传（语义说明默认开）。 */
     @PostMapping
     public ApiResponse<RepoSummary> summaryPost(@RequestBody SummaryRequest request) {
         return ApiResponse.ok(summaryService.summarize(
-                request.repoId(), request.semantics() == null || request.semantics()));
+                request.repoId(),
+                request.semantics() == null || request.semantics(),
+                request.refresh() != null && request.refresh()));
     }
 
-    public record SummaryRequest(Long repoId, Boolean semantics) {
+    public record SummaryRequest(Long repoId, Boolean semantics, Boolean refresh) {
     }
 }

@@ -90,12 +90,25 @@ public record RepoSummary(
 
     /**
      * 模型补的语义部分。没配模型时 {@code available=false}，**结构部分照常返回**（可降级设计）。
+     *
+     * @param cached     是不是**从缓存里取出来的**（键 = 仓库 + 索引版本 + 模型名）。
+     *                   这一栏必须在界面上显示出来：给使用者一份上次生成的说明而不告诉他，就是在骗人
+     * @param generatedAt 这份说明是什么时候生成的
+     * @param promptTokens / completionTokens 生成它花掉的 token（缓存命中时为 0：这次没花钱）
      */
     public record Semantics(
             boolean available,
             String model,
             String reason,
-            List<ModuleNote> notes) {
+            List<ModuleNote> notes,
+            boolean cached,
+            java.time.LocalDateTime generatedAt,
+            int promptTokens,
+            int completionTokens) {
+
+        public long totalTokens() {
+            return (long) promptTokens + completionTokens;
+        }
     }
 
     /**
@@ -121,6 +134,6 @@ public record RepoSummary(
     }
 
     public static Semantics noSemantics(String reason) {
-        return new Semantics(false, null, reason, List.of());
+        return new Semantics(false, null, reason, List.of(), false, null, 0, 0);
     }
 }

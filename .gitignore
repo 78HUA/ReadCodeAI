@@ -27,3 +27,10 @@ sample-repos/
 .env
 application-local.yml
 application-local.properties
+
+# 前端构建产物（npm run build 生成，不提交 —— 免得"改了源码忘了重建"）
+src/main/resources/static/
+# 前端依赖与本地缓存（本机 npm 全局缓存无写权限，约定用项目内目录绕开）
+frontend/node_modules/
+frontend/.npm-cache/
+frontend/dist/

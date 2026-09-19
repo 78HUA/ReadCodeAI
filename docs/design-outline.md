@@ -503,7 +503,7 @@ readcodeai:
     api-key: ${READCODEAI_LLM_API_KEY:}            # 只从环境变量读，不落配置文件
     model: ${READCODEAI_LLM_MODEL:}
     timeout-seconds: 60
-    max-rounds: 3                                  # 多跳预算：轮次
+    max-rounds: 8                                  # 多跳预算：轮次（最后一轮留给结论，故实际可查 6 跳）
     max-duration-ms: 60000                         # 多跳预算：时长
     max-estimated-tokens: 60000                    # 多跳预算：token
     max-estimated-cost: 0.5                        # 多跳预算：成本

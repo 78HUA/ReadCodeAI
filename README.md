@@ -14,7 +14,7 @@
 
 | 能力 | 说明 | 需要模型吗 |
 |---|---|---|
-| **索引仓库** | 三个入口：GitHub 链接 / 服务器本地路径 / 上传 zip；产出符号表、调用图、类型关系、可检索的代码块 | 否 |
+| **索引仓库** | 三个入口：GitHub 链接 / 服务器本地路径 / 上传 zip。**异步执行**：提交立刻返回任务，进度按阶段可查（已解析 N/M 个文件）；产出符号表、调用图、类型关系、可检索的代码块 | 否 |
 | **定位符号** | 「X 定义在哪」，精确到文件与起止行 | 否 |
 | **调用关系** | 谁调用了它 / 它调用了谁（未解析的调用如实计入缺口，不假装没有） | 否 |
 | **实现关系** | 某个接口有哪些实现类 / 某个类有哪些子类 | 否 |
@@ -53,6 +53,10 @@ export READCODEAI_DB_USERNAME=root
 export READCODEAI_LLM_BASE_URL=https://open.bigmodel.cn/api/paas/v4
 export READCODEAI_LLM_API_KEY=你的Key
 export READCODEAI_LLM_MODEL=glm-4-flash
+# 可选：Redis 只用来做"答案缓存"（同一个问题第二次问，52 秒 → 0.1 秒）
+# 不起 Redis 也能跑，只是每次都真算
+export READCODEAI_REDIS_HOST=127.0.0.1
+export READCODEAI_REDIS_PORT=6379
 ```
 
 任何 OpenAI 兼容端点都可以（`/chat/completions`），不限某一家。
@@ -88,6 +92,7 @@ npm run build          # 产物直接写进 src/main/resources/static/
 | 这时问语义问题 | 明确报错说"未配置 LLM，语义问答不可用"，并说明还剩哪些能力（HTTP 503），**不会静默返回空答案** |
 | 摘要的语义部分 | 返回 `semantics.available=false` 与原因，结构部分完整 |
 | 代码审查 | 规则部分照常，模型部分标记为不可用 |
+| 没起 Redis | **只是没有缓存**：问答照常，每次真算；日志里一条 warn 说明"取缓存失败（按未命中处理）" |
 
 ## 用法
 
@@ -121,9 +126,12 @@ npm run build          # 产物直接写进 src/main/resources/static/
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/repos` | 已索引仓库列表（含解析成功率、调用解析率） |
-| POST | `/api/repos` | 建索引：`{"path"}` 或 `{"gitUrl"}` |
-| POST | `/api/repos/upload` | 上传 zip 建索引（multipart，字段名 `file`） |
+| POST | `/api/repos` | **提交索引任务**：`{"path"}` 或 `{"gitUrl"}` → 立刻返回 `{id, repoId, status, stage}` |
+| GET | `/api/repos/{id}` | 单个仓库：仓库记录 + **最近一次索引任务的进度** |
+| POST | `/api/repos/upload` | 上传 zip 建索引（multipart，字段名 `file`），同样异步 |
 | DELETE | `/api/repos/{id}` | 删除索引（子表随外键级联） |
+| GET | `/api/index-jobs/{id}` | 索引任务的进度：`stage / done / total / percent` |
+| GET | `/api/index-jobs/queue` | 队列状态：正在跑几个、排队几个 |
 | GET | `/api/symbols/locate?repoId=&name=` | 定位符号 |
 | GET | `/api/symbols/{id}` | 符号详情 |
 | GET | `/api/symbols/{id}/callers` · `/callees` · `/implementations` | 调用关系与实现关系 |
@@ -150,6 +158,9 @@ npm run build          # 产物直接写进 src/main/resources/static/
 | `llm.max-estimated-cost` | 0.5 | 成本预算（按单价估算；免费档单价为 0 时这一维不起作用） |
 | `index.workspace` | `~/.readcodeai/repos` | 远程拉取与上传解压的存放目录 |
 | `index.max-file-size-kb` | 2048 | 单文件超过就跳过并记录 |
+| `cache.enabled` | `true` | 答案缓存开关；关掉或 Redis 连不上都只是"每次真算" |
+| `cache.answer-ttl-minutes` | 1440 | 答案缓存的 TTL（键里含索引版本，重新索引即自动失效） |
+| `spring.data.redis.*` | 127.0.0.1:6379 | Redis 连接（走环境变量 `READCODEAI_REDIS_*`） |
 | `retrieve.top-k` | 8 | 一次给模型的代码块上限 |
 | `retrieve.max-context-tokens` | 30000 | 上下文预算 |
 | `retrieve.max-chunks-per-file` | 3 | 防止热门文件霸占上下文 |
@@ -159,9 +170,10 @@ npm run build          # 产物直接写进 src/main/resources/static/
 ```
 api/          REST 接口（前端与脚本都走它）
 agent/        多跳循环：AgentLoop + 工具集 + 环检测 + 四维预算 + 模型输出契约
+agent/cache/  答案缓存（Redis；连不上自动降级为不缓存）
 retrieve/     三层检索：符号查询（确定性）· 全文检索（ngram）· [向量层预留]
 evidence/     证据核验（① 文件行号有效 ② 片段与磁盘一致 ③ 是否支持结论 —— 未实现，见下）
-index/        索引：扫描 → JavaParser 解析 → 符号/调用图/类型关系落库
+index/        索引：扫描 → JavaParser 解析 → 符号/调用图/类型关系落库；含异步任务与进度
 summary/      结构化摘要（结构查库 + 模型补一句话 + 回索引核对）
 review/       代码审查（规则算的 + 模型读的，两份分开返回）
 eval/         自动出题与自动判卷
@@ -199,7 +211,7 @@ export READCODEAI_LLM_API_KEY=...
 mvn test -Dreadcodeai.verify.repo=/path/to/a/java/repo
 ```
 
-当前：**124 个测试 · 0 失败 · 5 跳过**（跳过的是网络用例、与语料相关的可选断言、以及模型接口不可达时的实测用例）。
+当前：**132 个测试 · 0 失败 · 4 跳过**（跳过的是网络用例、与语料相关的可选断言、以及模型接口不可达时的实测用例）。
 
 ## 实测与已知限制
 
@@ -211,6 +223,9 @@ mvn test -Dreadcodeai.verify.repo=/path/to/a/java/repo
 - 单跳 vs 多跳的对比实验（真值由调用图反向 BFS 算出）：单跳上限 24.4% → 多跳 86.7% 平均召回；
   以及**结论率只有 3/15** 这个短板的真实数据
 - 摘要缓存的效果（首次 14.4 秒 → 之后 0.097 秒）
+- 异步索引：提交返回 16 秒 → **196 ms**，索引期间其它接口仍 **12 ms** 可用，进度按阶段可查
+- 答案缓存（Redis）：同一个问题第二次 **52.9 秒 → 0.113 秒**（约 468 倍），且一个 token 不花；
+  杀掉 Redis 后问答照常（只是每次真算）
 - 代码审查的实测：规则稳定可用、模型意见多数不可用，以及"证据全对、结论全错"的具体例子
 
 **已知限制**（每条在验证记录里都有数据）：
@@ -223,7 +238,10 @@ mvn test -Dreadcodeai.verify.repo=/path/to/a/java/repo
 6. **向量层未实现**：中文提问 ↔ 英文标识符的鸿沟目前靠全文检索兜着。
 7. **重新索引会重建仓库记录**：同一个路径重新索引是"删了再插"，所以 `repoId` 会变 ——
    脚本里别把它当长期稳定标识，每次先 `GET /api/repos` 查一遍。
-8. **问答的用量没有落库**：设计文档里的 `answer_log` 表（记录每次问答的 token、耗时、是否拒答）还没建，
+8. **索引任务不持久化**：进程内队列的代价 —— 重启后排队与运行中的任务会丢，
+   启动时会把它们如实标成失败并提示"请重新提交"。要做到重启自动接着跑，就需要消息队列了
+   （这也是这个项目"什么时候该上 MQ"的具体判据）。
+9. **问答的用量没有落库**：设计文档里的 `answer_log` 表（记录每次问答的 token、耗时、是否拒答）还没建，
    所以现在看不到"累计花了多少、拒答率多少"这类指标 —— 指标页展示的是自动评估的结果，不是运行统计。
 
 ## 目录

@@ -26,6 +26,9 @@ async function request(path, options = {}) {
 
 export const api = {
   repos: () => request('/api/repos'),
+  // 索引是异步的：提交拿到的是任务（立刻返回），进度用 indexJob 轮询
+  indexJob: (id) => request(`/api/index-jobs/${id}`),
+  indexQueue: () => request('/api/index-jobs/queue'),
   indexLocal: (path) => request('/api/repos', { method: 'POST', body: JSON.stringify({ path }) }),
   indexRemote: (gitUrl) => request('/api/repos', { method: 'POST', body: JSON.stringify({ gitUrl }) }),
   uploadArchive: (file) => {

@@ -85,7 +85,8 @@ public class SourceAnalyzer {
                 .setSymbolResolver(new JavaSymbolSolver(typeSolver)));
     }
 
-    public AnalyzeResult analyze(Path repoRoot, List<Path> javaFiles, int maxFileSizeKb) {
+    public AnalyzeResult analyze(Path repoRoot, List<Path> javaFiles, int maxFileSizeKb,
+                                 com.readcodeai.index.ProgressListener listener) {
         List<FileOutcome> outcomes = new ArrayList<>();
         List<ParsedFile> parsedFiles = new ArrayList<>();
         // 文件行文本留一份：生成检索单元时要按行切片，切出来的必须是源文件原文（行号与内容都要能回磁盘核对）
@@ -93,6 +94,7 @@ public class SourceAnalyzer {
 
         // ---- 解析 ----
         long parseStart = System.nanoTime();
+        int parsed = 0;
         for (Path file : javaFiles) {
             String relativePath = repoRoot.relativize(file).toString().replace('\\', '/');
             long sizeKb;
@@ -137,6 +139,8 @@ public class SourceAnalyzer {
             outcomes.add(new FileOutcome(relativePath, sha256(content), loc, true, null));
             parsedFiles.add(new ParsedFile(relativePath, result.getResult().get()));
             linesByFile.put(relativePath, content.lines().toList());
+            // 每个文件解析完报一次（写库节流在调用方做）—— 长任务必须能报出"到第几个了"
+            listener.onProgress("PARSING", ++parsed, javaFiles.size(), relativePath);
         }
         long parseMillis = (System.nanoTime() - parseStart) / 1_000_000;
 

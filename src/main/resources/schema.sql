@@ -202,3 +202,27 @@ CREATE TABLE IF NOT EXISTS repo_summary
     CONSTRAINT fk_summary_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '摘要的语义部分缓存（可重新生成）';
+
+-- 11. 索引任务：异步索引的"任务单"（接单 → 后台跑 → 随时可查进度）
+--
+-- 为什么是一张表而不是内存里的队列：**进程重启后要能看出"上次那个任务没跑完"**。
+-- 内存队列重启即丢，表现就是"仓库卡在 INDEXING 再也回不来" —— 这张表让这种状态可见。
+-- （真要做到"重启后自动接着跑"，那是消息队列的活，见 docs/design-outline.md 的选型表。）
+CREATE TABLE IF NOT EXISTS index_job
+(
+    id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+    repo_id    BIGINT       NULL COMMENT '仓库行创建后回填；拉取/解压阶段还没有仓库',
+    kind       VARCHAR(16)  NOT NULL COMMENT 'LOCAL / GIT / ARCHIVE',
+    source     VARCHAR(512) NOT NULL COMMENT '本地路径、GitHub 链接或原压缩包名',
+    status     VARCHAR(16)  NOT NULL COMMENT 'QUEUED / RUNNING / READY / FAILED',
+    stage      VARCHAR(16)  NULL COMMENT 'QUEUED/FETCHING/EXTRACTING/SCANNING/PARSING/STORING/DONE/FAILED',
+    done       INT          NOT NULL DEFAULT 0 COMMENT '当前阶段已完成的量（例如已解析文件数）',
+    total      INT          NOT NULL DEFAULT 0 COMMENT '当前阶段的总量',
+    message    VARCHAR(255) NULL,
+    created_at DATETIME     NOT NULL,
+    updated_at DATETIME     NOT NULL,
+    KEY idx_job_repo (repo_id),
+    KEY idx_job_status (status),
+    CONSTRAINT fk_job_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '索引任务与进度';

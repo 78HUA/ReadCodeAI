@@ -5,6 +5,7 @@
 // 这一步不能装作"秒回"，否则用户会在等待里以为界面卡死了。
 import { ref } from 'vue'
 import { api, formatNumber, formatPercent, formatMs, rate } from '../api.js'
+import { onUnmounted } from 'vue'
 
 const props = defineProps({ repos: Array, currentRepoId: Number })
 const emit = defineEmits(['refresh', 'select'])
@@ -16,38 +17,79 @@ const archive = ref(null)
 const busy = ref(false)
 const message = ref('')
 const error = ref('')
+const progress = ref(null)      // {stage, done, total, percent, message}
+let timer = null
 
+const STAGE_LABEL = {
+  QUEUED: '排队中', FETCHING: '拉取源码包', EXTRACTING: '解压压缩包',
+  SCANNING: '扫描源文件', PARSING: '解析源码', STORING: '写入索引',
+  DONE: '完成', FAILED: '失败'
+}
+
+function describe(job) {
+  const stage = STAGE_LABEL[job.stage] || job.stage || job.status
+  if (job.total > 0) {
+    return `${stage} ${job.done}/${job.total}（${job.percent}%）`
+  }
+  return `${stage}${job.message ? '：' + job.message : ''}`
+}
+
+/**
+ * 提交索引任务 —— **接口立刻返回，进度靠轮询**。
+ * 这是异步化的意义所在：索引是分钟级的长任务，同步做会把请求挂住、界面只能干等。
+ */
 async function submit() {
   error.value = ''
   message.value = ''
+  progress.value = null
   busy.value = true
   try {
-    let summary
+    let job
     if (mode.value === 'git') {
       if (!gitUrl.value.trim()) throw new Error('请填一个 GitHub 链接')
-      message.value = '正在从 GitHub 拉取源码包并索引…（公开仓库不需要 token）'
-      summary = await api.indexRemote(gitUrl.value.trim())
+      job = await api.indexRemote(gitUrl.value.trim())
     } else if (mode.value === 'path') {
       if (!localPath.value.trim()) throw new Error('请填服务器上的仓库路径')
-      message.value = '正在扫描本地路径并索引…'
-      summary = await api.indexLocal(localPath.value.trim())
+      job = await api.indexLocal(localPath.value.trim())
     } else {
       if (!archive.value) throw new Error('请选择一个 .zip 压缩包')
-      message.value = '正在上传并解压索引…'
-      summary = await api.uploadArchive(archive.value)
+      job = await api.uploadArchive(archive.value)
     }
-    message.value = `完成：${formatNumber(summary.fileCount)} 个文件 · ${formatNumber(summary.symbolCount)} 个符号 · `
-      + `解析成功率 ${formatPercent(rate(summary.parsedOkCount, summary.fileCount))} · 耗时 ${formatMs(summary.totalMillis)}`
+    message.value = `已提交索引任务 #${job.id}（接口立刻返回，后台在跑）`
     gitUrl.value = ''
     localPath.value = ''
     archive.value = null
-    emit('refresh')
+    poll(job.id)
   } catch (e) {
     error.value = e.message
     message.value = ''
-  } finally {
     busy.value = false
   }
+}
+
+function poll(jobId) {
+  clearInterval(timer)
+  timer = setInterval(async () => {
+    try {
+      const job = await api.indexJob(jobId)
+      progress.value = job
+      if (job.status === 'READY' || job.status === 'FAILED') {
+        clearInterval(timer)
+        busy.value = false
+        if (job.status === 'READY') {
+          message.value = `完成：${job.message}`
+        } else {
+          error.value = `索引失败：${job.message}`
+          message.value = ''
+        }
+        emit('refresh')
+      }
+    } catch (e) {
+      clearInterval(timer)
+      busy.value = false
+      error.value = e.message
+    }
+  }, 800)
 }
 
 async function remove(repo) {
@@ -63,6 +105,8 @@ async function remove(repo) {
 function onFile(event) {
   archive.value = event.target.files[0] || null
 }
+
+onUnmounted(() => clearInterval(timer))
 </script>
 
 <template>
@@ -97,6 +141,11 @@ function onFile(event) {
     </div>
 
     <p v-if="message" class="notice info" style="margin-top: 12px">{{ message }}</p>
+    <p v-if="progress" class="notice" style="margin-top: 12px">
+      <span class="spinner" v-if="progress.status === 'RUNNING' || progress.status === 'QUEUED'"></span>
+      {{ describe(progress) }}
+      <span class="small muted">（任务 #{{ progress.id }} · 状态 {{ progress.status }}）</span>
+    </p>
     <p v-if="error" class="error" style="margin-top: 12px">{{ error }}</p>
   </div>
 
@@ -128,8 +177,8 @@ function onFile(event) {
             <span class="badge" :class="repo.status === 'READY' ? 'ok' : 'warn'">{{ repo.status }}</span>
           </td>
           <td class="row" style="gap: 2px">
-            <button class="link" @click="emit('select', repo.id, 'summary')">看概览</button>
-            <button class="link" @click="emit('select', repo.id, 'ask')">去提问</button>
+            <button class="link" :disabled="repo.status !== 'READY'" @click="emit('select', repo.id, 'summary')">看概览</button>
+            <button class="link" :disabled="repo.status !== 'READY'" @click="emit('select', repo.id, 'ask')">去提问</button>
             <button class="link danger" @click="remove(repo)">删除</button>
           </td>
         </tr>

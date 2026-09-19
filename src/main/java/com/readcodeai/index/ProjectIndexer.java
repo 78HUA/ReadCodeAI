@@ -60,6 +60,39 @@ public class ProjectIndexer {
         return index(repoRoot, null);
     }
 
+    /**
+     * 建好仓库行（状态 INDEXING）并返回 repoId —— **异步任务的第一半步**。
+     *
+     * <p>把"建行"和"跑索引"拆开，是因为异步场景下这两件事发生的时间不一样：
+     * 接单时就要能告诉调用方一个 repoId，而干活还在后面。
+     */
+    public long createPendingRepo(Path repoRoot, String commitHashOverride) {
+        Path root = repoRoot.toAbsolutePath().normalize();
+        if (!Files.isDirectory(root)) {
+            throw new IllegalArgumentException("不是目录：" + root);
+        }
+        String name = root.getFileName() == null ? root.toString() : root.getFileName().toString();
+        String commitHash = commitHashOverride != null ? commitHashOverride : readCommitHash(root);
+        return repository.beginRepo(name, root.toString(), commitHash);
+    }
+
+    /**
+     * @param commitHashOverride 远程拉取时带进来的提交号；为 null 时尝试从本地 {@code .git} 读
+     */
+    public IndexSummary index(Path repoRoot, String commitHashOverride) {
+        Path root = repoRoot.toAbsolutePath().normalize();
+        long repoId = createPendingRepo(root, commitHashOverride);
+        String name = root.getFileName() == null ? root.toString() : root.getFileName().toString();
+        String commitHash = commitHashOverride != null ? commitHashOverride : readCommitHash(root);
+        return indexInto(repoId, root, name, commitHash, ProgressListener.NOOP);
+    }
+
+    /**
+     * 索引的**主体**：仓库行已经建好了，这里只干活。
+     *
+     * <p>同步路径（{@link #index(Path, String)}）与异步路径（{@code AsyncIndexer}）都走它 ——
+            long storeStart = System.nanoTime();
+
     /** 上传压缩包的大小上限：与 GitHub 源码包同一个量级，够放一个中等仓库。 */
     public static final long MAX_UPLOAD_BYTES = 200L * 1024 * 1024;
 
@@ -145,27 +178,29 @@ public class ProjectIndexer {
     }
 
     /**
-     * @param commitHashOverride 远程拉取时带进来的提交号；为 null 时尝试从本地 {@code .git} 读
+     * 索引的**主体**：仓库行已经建好了，这里只干活。
+     *
+     * <p>同步路径（{@link #index(Path, String)}）与异步路径（{@code AsyncIndexer}）都走它 ——
+     * 同一条流水线，区别只在"谁报进度"和"谁来调用"。
+     *
+     * @param listener 进度回调；每个文件解析完都会报一次（实现在写库前自行节流）
      */
-    public IndexSummary index(Path repoRoot, String commitHashOverride) {
+    public IndexSummary indexInto(long repoId, Path root, String name, String commitHash,
+                                  ProgressListener listener) {
         long start = System.nanoTime();
-        Path root = repoRoot.toAbsolutePath().normalize();
-        if (!Files.isDirectory(root)) {
-            throw new IllegalArgumentException("不是目录：" + root);
-        }
-        String name = root.getFileName() == null ? root.toString() : root.getFileName().toString();
-        String commitHash = commitHashOverride != null ? commitHashOverride : readCommitHash(root);
-        long repoId = repository.beginRepo(name, root.toString(), commitHash);
         log.info("开始索引 {}（repoId={}, commit={}）", root, repoId, commitHash);
 
         try {
+            listener.onProgress("SCANNING", 0, 0, "扫描源文件");
             List<Path> sourceRoots = findSourceRoots(root);
             List<Path> javaFiles = collectJavaFiles(root, sourceRoots);
             log.info("源码根 {} 个，Java 文件 {} 个", sourceRoots.size(), javaFiles.size());
+            listener.onProgress("PARSING", 0, javaFiles.size(), "解析 " + javaFiles.size() + " 个文件");
 
             AnalyzeResult analyzed = new SourceAnalyzer(sourceRoots)
-                    .analyze(root, javaFiles, properties.getIndex().getMaxFileSizeKb());
+                    .analyze(root, javaFiles, properties.getIndex().getMaxFileSizeKb(), listener);
 
+            listener.onProgress("STORING", 0, 0, "写入索引（符号 / 调用图 / 检索单元）");
             long storeStart = System.nanoTime();
             Map<String, Long> fileIds = repository.insertSourceFiles(repoId, analyzed.files());
             Map<String, Long> symbolIds = repository.insertSymbols(repoId, analyzed.symbols(), fileIds);
@@ -195,10 +230,13 @@ public class ProjectIndexer {
                     repository.unresolvedReasonCounts(repoId),
                     analyzed.parseMillis(), analyzed.resolveMillis(), storeMillis,
                     (System.nanoTime() - start) / 1_000_000);
+            listener.onProgress("DONE", analyzed.files().size(), analyzed.files().size(),
+                    "索引完成：" + analyzed.files().size() + " 个文件 · " + summary.symbolCount() + " 个符号");
             log.info("索引完成：{}", summary.toReport().replace(System.lineSeparator(), " | "));
             return summary;
         } catch (RuntimeException | LinkageError e) {
             // 兜底：真出现预料之外的错误时，repo 行必须被标成 FAILED 而不是留在 INDEXING 状态
+            listener.onProgress("FAILED", 0, 0, e.getClass().getSimpleName() + ": " + e.getMessage());
             repository.failRepo(repoId, e.getClass().getSimpleName() + ": " + e.getMessage());
             throw e;
         }

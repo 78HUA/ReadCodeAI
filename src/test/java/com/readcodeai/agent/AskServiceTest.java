@@ -47,7 +47,7 @@ class AskServiceTest {
 
     @Test
     void answersWithEvidenceAndOnlyCitesChunksItWasGiven() {
-        assumeTrue(llmClient.available(), "未配置 LLM，跳过问答验证");
+        com.readcodeai.verify.LiveLlm.assumeReachable(llmClient);
 
         RepoView repo = corpus();
         SymbolView target = mostCalled(repo.id());
@@ -103,7 +103,7 @@ class AskServiceTest {
 
     @Test
     void scopingToOneFileNarrowsTheSearch() {
-        assumeTrue(llmClient.available(), "未配置 LLM，跳过问答验证");
+        com.readcodeai.verify.LiveLlm.assumeReachable(llmClient);
 
         RepoView repo = corpus();
         SymbolView target = mostCalled(repo.id());

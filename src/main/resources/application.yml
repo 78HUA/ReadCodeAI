@@ -10,6 +10,13 @@ spring:
     init:
       # schema.sql 全部是 CREATE TABLE IF NOT EXISTS，重复启动安全
       mode: always
+  data:
+    redis:
+      # 只从环境变量读；没起 Redis 时会降级为"不缓存"，不影响问答本身
+      host: ${READCODEAI_REDIS_HOST:127.0.0.1}
+      port: ${READCODEAI_REDIS_PORT:6379}
+      password: ${READCODEAI_REDIS_PASSWORD:}
+      timeout: 2s
   servlet:
     multipart:
       # 上传压缩包：真正的上限在 ProjectIndexer.MAX_UPLOAD_BYTES（那里会给出人话的错误），
@@ -46,6 +53,10 @@ readcodeai:
       - "**/target/**"
       - "**/build/**"
       - "**/generated/**"
+  cache:
+    # 答案缓存：同一个问题（同一份索引）第二次问时直接给上次的结果，不再花 10—40 秒与几千 token
+    enabled: ${READCODEAI_CACHE_ENABLED:true}
+    answer-ttl-minutes: 1440
   retrieve:
     top-k: 8
     # 不把整个仓库塞进上下文

@@ -123,7 +123,8 @@ class MultiHopComparisonTest {
         }
         return new AgentService(answerService,
                 new AgentLoop(toolRegistry, evidenceVerifier, ScriptedLlmClient.lines(lines.toArray(String[]::new))),
-                queryRouter, queries, ScriptedLlmClient.lines(lines.toArray(String[]::new)), properties);
+                queryRouter, queries, ScriptedLlmClient.lines(lines.toArray(String[]::new)),
+                new com.readcodeai.agent.cache.NoopAnswerCache("对比实验不用缓存（每轮都真跑）"), properties);
     }
 
     /**

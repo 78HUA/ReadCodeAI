@@ -12,6 +12,7 @@ public class ReadCodeAiProperties {
     private final Llm llm = new Llm();
     private final Index index = new Index();
     private final Retrieve retrieve = new Retrieve();
+    private final Cache cache = new Cache();
 
     /** 启动时校验，非法值当场失败 —— 预算参数写错要到运行时才暴露，代价太大。 */
     @PostConstruct
@@ -19,6 +20,7 @@ public class ReadCodeAiProperties {
         llm.validate();
         index.validate();
         retrieve.validate();
+        cache.validate();
     }
 
     public Llm getLlm() {
@@ -31,6 +33,46 @@ public class ReadCodeAiProperties {
 
     public Retrieve getRetrieve() {
         return retrieve;
+    }
+
+    public Cache getCache() {
+        return cache;
+    }
+
+    /**
+     * 答案缓存（Redis）。
+     *
+     * <p>只缓存**模型给出的**答案：确定性问题（定位/调用关系）本来就只有几毫秒，
+     * 缓存它既没有收益、又增加"拿到过期结果"的风险。
+     */
+    public static class Cache {
+
+        /** 关掉它、或 Redis 连不上，都只是"每次都真算一遍"，问答本身不受影响（可降级）。 */
+        private boolean enabled = true;
+
+        private long answerTtlMinutes = 1440;
+
+        void validate() {
+            if (answerTtlMinutes <= 0) {
+                throw new IllegalStateException("readcodeai.cache.answer-ttl-minutes 必须大于 0");
+            }
+        }
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public long getAnswerTtlMinutes() {
+            return answerTtlMinutes;
+        }
+
+        public void setAnswerTtlMinutes(long answerTtlMinutes) {
+            this.answerTtlMinutes = answerTtlMinutes;
+        }
     }
 
     public static class Llm {

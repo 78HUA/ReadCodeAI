@@ -135,7 +135,13 @@ function isRefusal(entry) {
       </template>
 
       <h3>过程</h3>
+      <p v-if="entry.answer.cached" class="notice info small" style="margin-bottom: 8px">
+        这条答案**来自缓存**：同一个问题（同一份索引）之前问过，直接取上次的结果 ——
+        本次没有调用模型、没有花时间与 token（当初生成花了
+        {{ (entry.answer.promptTokens || 0) + (entry.answer.completionTokens || 0) }} token）。
+      </p>
       <p class="meta small">
+        <span v-if="entry.answer.cached" class="badge warn">缓存命中</span>
         <span class="badge" :class="entry.answer.answeredBy === 'STATIC' ? 'ok' : 'info'">
           {{ entry.answer.answeredBy === 'STATIC' ? '调用图/符号表直接算出（未经模型）' : '由模型组织' }}
         </span>

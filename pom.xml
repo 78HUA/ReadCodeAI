@@ -50,6 +50,16 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!--
+          答案缓存用的 Redis。**只有这一处用 Redis**，理由写在 AnswerCache 的注释里：
+          它省下的是"每次重复提问 10–40 秒 + 几千 token"，收益足够具体；
+          而摘要缓存（省 83ms）之类就没必要为它多引一个中间件。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-configuration-processor</artifactId>

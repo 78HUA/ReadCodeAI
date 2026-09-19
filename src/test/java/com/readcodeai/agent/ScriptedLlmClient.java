@@ -103,6 +103,23 @@ public class ScriptedLlmClient implements LlmClient {
                 + "\",\"why\":\"脚本给的证据\"}],\"refused\":false,\"refusalReason\":\"\"}}";
     }
 
+    /**
+     * 单跳问答的形状：**平铺**（{@code answer}/{@code evidence} 在顶层）。
+     *
+     * <p>与 {@link #answer} 的区别不是风格问题：多跳那支套了一层 {@code final}，
+     * 而单跳的解析器只认平铺字段 —— 用错了会得到"模型给了结论却没有证据"，然后按拒答处理。
+     * 这个坑实测踩过（测试假绿了一轮），所以两个形状各给一个显式的构造器。
+     */
+    public static String singleHopAnswer(String text, String file, int startLine, int endLine,
+                                         String snippet) {
+        String snippetJson = snippet == null ? "" : snippet.replace("\\", "\\\\").replace("\"", "\\\"")
+                .replace("\n", "\\n");
+        return "{\"answer\":\"" + text + "\",\"evidence\":[{\"file\":\"" + file
+                + "\",\"startLine\":" + startLine + ",\"endLine\":" + endLine
+                + ",\"snippet\":\"" + snippetJson + "\",\"why\":\"脚本给的证据\"}],"
+                + "\"refused\":false,\"refusalReason\":\"\"}";
+    }
+
     public static String refuse(String reason) {
         return "{\"thought\":\"材料不够\",\"final\":{\"answer\":\"\",\"evidence\":[],\"refused\":true,"
                 + "\"refusalReason\":\"" + reason + "\"}}";

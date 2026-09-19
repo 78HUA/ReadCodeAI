@@ -125,15 +125,19 @@ class AgentServiceTest {
         RepoView repo = corpus();
         SymbolView target = firstWithCallers(repo.id());
         ScriptedLlmClient client = ScriptedLlmClient.lines(
-                ScriptedLlmClient.answer("单跳只查了一次", target.filePath(),
+                ScriptedLlmClient.singleHopAnswer("单跳只查了一次", target.filePath(),
                         target.startLine(), target.endLine(), null));
 
+        // 问题里要带上真实的标识符：gson 是英文语料，纯中文问句检索不到任何片段，
+        // 那样会在"检索为空"这一步就拒答（正确行为，但测不到我们想测的单跳路径）
         AgentAnswer answer = serviceWith(client)
-                .ask(repo.id(), "这个方法大致是做什么的", AgentMode.SINGLE_HOP, null, 8);
+                .ask(repo.id(), "这个方法大致是做什么的：" + target.qualifiedName() + "？",
+                        AgentMode.SINGLE_HOP, null, 8);
 
         assertThat(answer.mode()).isEqualTo(AgentMode.SINGLE_HOP);
         assertThat(answer.stopReason()).isIn(StopReason.SINGLE_HOP, StopReason.STATIC);
         assertThat(answer.steps()).as("单跳没有轨迹").isEmpty();
+        assertThat(answer.refused()).as("单跳要真的给出答案（这条断言以前是漏的，被假绿过）").isFalse();
         assertThat(client.calls()).as("单跳最多一次模型调用").isLessThanOrEqualTo(1);
     }
 
@@ -141,7 +145,8 @@ class AgentServiceTest {
     void multiHopRefusesToPretendWhenNoModelIsConfigured() {
         AgentService service = new AgentService(answerService,
                 new AgentLoop(toolRegistry, evidenceVerifier, new NoopLlmClient("测试：未配置")),
-                queryRouter, queries, new NoopLlmClient("测试：未配置"), properties);
+                queryRouter, queries, new NoopLlmClient("测试：未配置"),
+                new com.readcodeai.agent.cache.NoopAnswerCache("测试"), properties);
         RepoView repo = corpus();
 
         assertThatThrownBy(() -> service.ask(repo.id(), "这个参数是从哪来的？", AgentMode.MULTI_HOP, null, 8))
@@ -160,7 +165,8 @@ class AgentServiceTest {
         AnswerService singleHop = new AnswerService(textRetriever, queries, queryRouter, contextSelector,
                 evidenceVerifier, evidenceRepair, client, properties);
         return new AgentService(singleHop, new AgentLoop(toolRegistry, evidenceVerifier, client),
-                queryRouter, queries, client, properties);
+                queryRouter, queries, client, new com.readcodeai.agent.cache.NoopAnswerCache("测试"),
+                properties);
     }
 
     private SymbolView firstWithCallers(long repoId) {

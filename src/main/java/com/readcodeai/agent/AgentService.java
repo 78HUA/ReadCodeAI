@@ -1,5 +1,6 @@
 package com.readcodeai.agent;
 
+import com.readcodeai.agent.cache.AnswerCache;
 import com.readcodeai.agent.model.AgentAnswer;
 import com.readcodeai.agent.model.AgentMode;
 import com.readcodeai.agent.model.AnsweredBy;
@@ -11,6 +12,7 @@ import com.readcodeai.config.ReadCodeAiProperties;
 import com.readcodeai.retrieve.QueryRouter;
 import com.readcodeai.retrieve.SymbolLookups;
 import com.readcodeai.retrieve.SymbolQueryService;
+import com.readcodeai.retrieve.model.RepoView;
 import com.readcodeai.retrieve.model.SymbolView;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,16 +52,18 @@ public class AgentService {
     private final QueryRouter queryRouter;
     private final SymbolQueryService symbolQueryService;
     private final LlmClient llmClient;
+    private final AnswerCache answerCache;
     private final ReadCodeAiProperties properties;
 
     public AgentService(AnswerService answerService, AgentLoop agentLoop, QueryRouter queryRouter,
                         SymbolQueryService symbolQueryService, LlmClient llmClient,
-                        ReadCodeAiProperties properties) {
+                        AnswerCache answerCache, ReadCodeAiProperties properties) {
         this.answerService = answerService;
         this.agentLoop = agentLoop;
         this.queryRouter = queryRouter;
         this.symbolQueryService = symbolQueryService;
         this.llmClient = llmClient;
+        this.answerCache = answerCache;
         this.properties = properties;
     }
 
@@ -69,7 +73,8 @@ public class AgentService {
         }
         AgentMode effectiveMode = mode == null ? AgentMode.MULTI_HOP : mode;
         long effectiveRepoId = repoId != null ? repoId : symbolQueryService.requireLatestRepoId();
-        Path repoRoot = Path.of(symbolQueryService.requireRepo(effectiveRepoId).rootPath());
+        RepoView repo = symbolQueryService.requireRepo(effectiveRepoId);
+        Path repoRoot = Path.of(repo.rootPath());
 
         QueryRouter.Routed routed = queryRouter.route(effectiveRepoId, question,
                 SymbolLookups.of(symbolQueryService, effectiveRepoId));
@@ -77,12 +82,28 @@ public class AgentService {
         boolean wantsMultiHop = effectiveMode == AgentMode.MULTI_HOP
                 && (!routed.isDeterministic() || ChainIntent.isChainQuestion(question));
 
+        // 只有"要叫模型"的那两条路才查缓存：确定性问题本来就只有几毫秒，缓存它没有收益，
+        // 却凭空多一份可能过期的数据（见 AnswerCache 的注释）
+        if (wantsMultiHop || !routed.isDeterministic()) {
+            String indexedAt = repo.indexedAt() == null ? null : repo.indexedAt().toString();
+            AgentAnswer cached = readCache(effectiveRepoId, indexedAt, question, effectiveMode);
+            if (cached != null) {
+                log.info("答案缓存命中：省下一次生成（当初花了 {} token）", cached.generationTokens());
+                return cached;
+            }
+        }
+
         if (!wantsMultiHop) {
             AskAnswer answer = answerService.ask(effectiveRepoId, question, scopePath, topK);
             StopReason reason = answer.answeredBy() == AnsweredBy.STATIC
                     ? StopReason.STATIC : StopReason.SINGLE_HOP;
             log.info("问答走单跳/静态路线：answeredBy={}", answer.answeredBy());
-            return AgentAnswer.from(answer, effectiveMode, reason);
+            AgentAnswer converted = AgentAnswer.from(answer, effectiveMode, reason);
+            // 单跳也是"叫了模型"的路线，同样缓存（确定性问题不会走到这里）
+            if (converted.answeredBy() == AnsweredBy.LLM) {
+                putIfCacheable(effectiveRepoId, repo, question, effectiveMode, converted);
+            }
+            return converted;
         }
 
         if (!llmClient.available()) {
@@ -90,10 +111,50 @@ public class AgentService {
                     + "定位 / 调用关系 / 实现类 / 全文检索等确定性能力不受影响");
         }
         // scopePath / topK 是多跳里用不上的旋钮：检索范围由模型自己决定，手动限定反而会把它框死
-        return agentLoop.run(effectiveRepoId, repoRoot, question, seedObservations(routed),
+        AgentAnswer answer = agentLoop.run(effectiveRepoId, repoRoot, question, seedObservations(routed),
                 BudgetGuard.of(properties));
+        putIfCacheable(effectiveRepoId, repo, question, effectiveMode, answer);
+        return answer;
         // 注：种子把目标符号的定义行一并交给模型（seedObservations 里同时返回位置），
         // 因此"引用目标自身的定义"是有据可依的，不会被"引用必须落在轨迹里"这条规则误杀。
+    }
+
+    /**
+     * 只缓存**模型给出、且没被拒答**的答案。
+     *
+     * <p>为什么拒答不进缓存：拒答的原因常常是临时的（模型接口抽风、输出格式坏、预算不够），
+     * 缓存它等于把一次偶发失败固化下来。宁可下次重算。
+     */
+    private void putIfCacheable(long repoId, RepoView repo, String question, AgentMode mode,
+                                AgentAnswer answer) {
+        if (answer.refused() || answer.answeredBy() != AnsweredBy.LLM) {
+            return;
+        }
+        String indexedAt = repo.indexedAt() == null ? null : repo.indexedAt().toString();
+        try {
+            answerCache.put(repoId, indexedAt, question, mode.name(), answer);
+        } catch (RuntimeException e) {
+            // 缓存写失败只该表现为"下次还得重算"，绝不能影响这次回答
+            log.warn("写答案缓存失败（不影响本次回答）：{}", e.toString());
+        }
+    }
+
+    /**
+     * 读缓存，**任何异常都按"没有缓存"处理**。
+     *
+     * <p>为什么不指望缓存实现自己吞异常：那是"每个实现都要记得做对"的约定，
+     * 而这里是"无论实现怎么写，问答都照常"的保证 —— 缓存是加速手段，不是正确性依赖。
+     */
+    private AgentAnswer readCache(long repoId, String indexedAt, String question, AgentMode mode) {
+        try {
+            // 命中就统一标成"来自缓存"（缓存实现只管存取，不负责这件事）
+            return answerCache.get(repoId, indexedAt, question, mode.name())
+                    .map(AgentAnswer::asCached)
+                    .orElse(null);
+        } catch (RuntimeException e) {
+            log.warn("读答案缓存失败（按未命中处理）：{}", e.toString());
+            return null;
+        }
     }
 
     /**

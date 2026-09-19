@@ -31,14 +31,35 @@ public record AgentAnswer(
         int completionTokens,
         double estimatedCost,
         long latencyMs,
-        VerificationSummary verification) {
+        VerificationSummary verification,
+        /** 这次结果是**从缓存里取出来的**（键 = 仓库 + 索引版本 + 问题）。界面必须标出来 */
+        boolean cached,
+        /** 缓存里那份答案是什么时候生成的（本次没有生成，只是取出来） */
+        java.time.LocalDateTime cachedAt) {
 
     /** 单跳 / 确定性路线的结果转换 —— 两种模式因此可以共用一套指标。 */
     public static AgentAnswer from(AskAnswer answer, AgentMode mode, StopReason stopReason) {
         return new AgentAnswer(answer.answer(), answer.evidence(), answer.refused(),
                 answer.refusalReason(), answer.answeredBy(), mode, List.of(), 0, 0, 0,
                 stopReason, answer.promptTokens(), answer.completionTokens(), 0,
-                answer.latencyMs(), answer.verification());
+                answer.latencyMs(), answer.verification(), false, null);
+    }
+
+    /**
+     * 取缓存时用：标成"来自缓存"并把耗时归零（本次确实没花时间在生成上）。
+     *
+     * <p>token 字段**保持生成时的原值** —— 它描述的是"这份答案当初花了多少"，
+     * 而 {@code cached=true} 说明"这次没有再花"。两者都留着，界面才能说清"省了多少"。
+     */
+    public AgentAnswer asCached() {
+        return new AgentAnswer(answer, evidence, refused, reason, answeredBy, mode, steps, rounds,
+                toolCalls, repeatedCalls, stopReason, promptTokens, completionTokens, estimatedCost,
+                0, verification, true, java.time.LocalDateTime.now());
+    }
+
+    /** 这份答案当初生成时花了多少 token（缓存命中时界面用它说明"省下了多少"）。 */
+    public long generationTokens() {
+        return (long) promptTokens + completionTokens;
     }
 
     /** 轨迹里查到的全部证据（与结论引用的是两回事：轨迹证据是查出来的，未经模型复述）。 */

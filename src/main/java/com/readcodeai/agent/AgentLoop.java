@@ -269,7 +269,8 @@ public class AgentLoop {
                     (int) budget.usage().promptTokens(), (int) budget.usage().completionTokens(),
                     budget.usage().estimatedCost(), elapsedMillis(startNanos),
                     new VerificationSummary(accepted.size(), report.failed(),
-                            corrections > 0 ? List.of("按核验失败提示重发过一次结论") : List.of()));
+                            corrections > 0 ? List.of("按核验失败提示重发过一次结论") : List.of()),
+                    false, null);
         }
 
         // ---- 停机：**不假装答出来了**，但轨迹里查到的东西一并交出来（有材料 ≠ 有结论）----
@@ -282,7 +283,8 @@ public class AgentLoop {
         return new AgentAnswer(null, trail, true, reason, AnsweredBy.LLM, AgentMode.MULTI_HOP, steps,
                 budget.usage().rounds(), budget.usage().toolCalls(), budget.usage().repeatedCalls(),
                 stop, (int) budget.usage().promptTokens(), (int) budget.usage().completionTokens(),
-                budget.usage().estimatedCost(), elapsedMillis(startNanos), VerificationSummary.none());
+                budget.usage().estimatedCost(), elapsedMillis(startNanos), VerificationSummary.none(),
+                false, null);
     }
 
     private static StopReason budgetStopReason(BudgetGuard budget) {

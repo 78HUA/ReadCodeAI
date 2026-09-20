@@ -422,6 +422,8 @@ com.readcodeai
 
 ```
 问题
+   → SummaryIntent 判定「总结类问题」→ **直接读结构化摘要作答**（结构算出来 + 语义模型补）
+       —— 不走检索、不走多跳：这类问题的答案不在某几段代码里（实测走多跳 93 秒仍无结论）
    → QueryRouter 判定类型（定位 / 调用 / 结构 / 实现 / 影响面 / 模糊）
    → 第 1 层（能算准的）：直接查符号表 / 调用图 → 得到确定结果
    → 第 2 层（必要时）：全文检索补充候选
@@ -432,6 +434,11 @@ com.readcodeai
        └─ 不通过 → EvidenceRepair 定向补检索 → 重试（受预算约束）→ 仍不通过则拒答
    → 写 answer_log + evidence_check
 ```
+
+**多跳的预算有两种档**：默认（轮次 8）与**深链**（轮次 14，追问页勾选）——
+深链把轮次/时长/token 三项额度放宽，**成本上限不放宽**（那是红线）。
+实测它换来的是"查到更多"（一轮实验里轮次 7→13、命中证据 4→7），
+**不保证给出结论**（那取决于模型什么时候收敛，见 `verification-log.md`）。
 
 **③ 校验失败后的定向补检索**
 
@@ -518,6 +525,10 @@ readcodeai:
     max-duration-ms: 60000                         # 多跳预算：时长
     max-estimated-tokens: 60000                    # 多跳预算：token
     max-estimated-cost: 0.5                        # 多跳预算：成本
+    deep:                                          # 深链模式（追问页勾选）：把三项额度放大的那一组
+      max-rounds: 14                               #   14 轮 = 实际最多查 12 跳
+      max-duration-ms: 180000                      #   不放宽时长的话，时长会先于轮次触发
+      max-estimated-tokens: 120000                 #   （成本上限不分深浅 —— 它是红线）
     input-price-per-million: 0                     # 计价参数，用于成本估算
     output-price-per-million: 0
   index:

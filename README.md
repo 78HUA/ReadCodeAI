@@ -110,6 +110,18 @@ npm run build          # 产物直接写进 src/main/resources/static/
 **结论 / 证据 / 过程**。证据卡片能点开，显示的是**磁盘上此刻的真实内容**，
 并告诉你"这个文件在索引之后有没有被改过"（改过则行号可能已漂移）。
 
+两条自动分流（都不用你选）：
+
+- **总结类问题**（"这个项目是干什么的""有哪些模块"）→ 不走检索，直接读**结构化摘要**：
+  规模、模块划分、入口与调用枢纽都由索引算出（每条证据都能点开核对），"它做什么"由模型依据这些材料组织。
+  实测：同一个「这个项目是干什么的」，走多跳 93 秒仍没有结论；走摘要 0.2 秒（缓存）/ 首次约 15 秒给出答案。
+- **确定性问题**（"谁调用了 X"）→ 查调用图，不经模型（毫秒级、0 token）。
+
+**深链模式**（追问页勾选，多跳时可用）：把多跳的轮次从 8 提到 14、时长与 token 额度同步放宽，
+用来追长链。它换来的是**查到更多**（一次实测：轮次 7→13、命中证据 4→7），
+**不保证给出结论** —— 那取决于模型什么时候收尾。额度在配置里（`readcodeai.llm.deep.*`），
+界面只能选要不要 —— 预算是闸门，不该由前端填数字。
+
 ![追问：证据卡片与多跳轨迹](docs/images/ask-multihop.png)
 
 ### 证据核对：点开就是真实代码
@@ -150,7 +162,7 @@ npm run build          # 产物直接写进 src/main/resources/static/
 | GET | `/api/symbols/{id}/callers` · `/callees` · `/implementations` | 调用关系与实现关系 |
 | GET | `/api/search?repoId=&q=` | 全文检索 |
 | POST | `/api/ask` | 单跳问答（`{repoId, question, scopePath?, topK?}`） |
-| POST | `/api/agent` | 多跳问答（`{repoId, question, mode: single\|multi}`） |
+| POST | `/api/agent` | 问答（`{repoId, question, mode: single\|multi, deep?: bool}`）：总结类问题自动走结构化摘要；`deep=true` 用深链额度 |
 | GET·POST | `/api/summary` | 结构化摘要（`semantics=false` 只要结构；`refresh=true` 强制重新生成语义） |
 | POST | `/api/review` | 代码审查（`{repoId, target, focus?}`，`target` 是类名或符号 id） |
 | GET | `/api/files/content?repoId=&path=&startLine=&endLine=` | 读磁盘上的真实文件内容（证据核对用） |
@@ -171,6 +183,7 @@ npm run build          # 产物直接写进 src/main/resources/static/
 | `llm.max-duration-ms` | 60000 | 多跳时长预算（决定"不再发起下一轮"，不中断进行中的调用） |
 | `llm.max-estimated-tokens` | 60000 | 多跳 token 预算 |
 | `llm.max-estimated-cost` | 0.5 | 成本预算（按单价估算；免费档单价为 0 时这一维不起作用） |
+| `llm.deep.max-rounds` / `max-duration-ms` / `max-estimated-tokens` | 14 / 180000 / 120000 | **深链模式**（追问页勾选）放宽的那三项额度：14 轮 = 实际最多查 12 跳。成本上限刻意不分深浅。实测它换来"查到更多"（7→13 轮、证据 4→7），不保证给出结论 |
 | `index.workspace` | `~/.readcodeai/repos` | 远程拉取与上传解压的存放目录 |
 | `index.max-file-size-kb` | 2048 | 单文件超过就跳过并记录 |
 | `index.parse-threads` | 0 | 解析并行度：`0` = 自动（核数与 8 取小），`1` = 串行（对照组/逃生门） |

@@ -15,6 +15,9 @@ public class ReadCodeAiProperties {
     private final Cache cache = new Cache();
     private final Verify verify = new Verify();
     private final Embedding embedding = new Embedding();
+    private final Queue queue = new Queue();
+    private final Lock lock = new Lock();
+    private final RateLimit rateLimit = new RateLimit();
 
     /** 启动时校验，非法值当场失败 —— 预算参数写错要到运行时才暴露，代价太大。 */
     @PostConstruct
@@ -25,6 +28,9 @@ public class ReadCodeAiProperties {
         cache.validate();
         verify.validate();
         embedding.validate();
+        queue.validate();
+        lock.validate();
+        rateLimit.validate();
     }
 
     public Llm getLlm() {
@@ -49,6 +55,225 @@ public class ReadCodeAiProperties {
 
     public Embedding getEmbedding() {
         return embedding;
+    }
+
+    public Queue getQueue() {
+        return queue;
+    }
+
+    public Lock getLock() {
+        return lock;
+    }
+
+    public RateLimit getRateLimit() {
+        return rateLimit;
+    }
+
+    /**
+     * 会调模型的接口的限流（令牌桶，Redis + Lua）。
+     *
+     * <p>限的是**稀缺资源**（模型额度与时间），不是"显得专业"：一次问答几千 token、几十秒，
+     * 没有闸门时一个循环脚本就能把额度打满。符号查询 / 全文检索这些本地操作不限。
+     */
+    public static class RateLimit {
+
+        /** 关掉即不限流；Redis 不可用时也会自动放行（保护件不该升级成全站故障）。 */
+        private boolean enabled = true;
+
+        /** 桶容量：允许的突发量（连着问几个问题不会被立刻拒）。 */
+        private int capacity = 10;
+
+        /** 每分钟补充多少令牌 = 稳态速率上限。 */
+        private int refillPerMinute = 20;
+
+        void validate() {
+            if (capacity <= 0) {
+                throw new IllegalStateException("readcodeai.rate-limit.capacity 必须大于 0");
+            }
+            if (refillPerMinute <= 0) {
+                throw new IllegalStateException("readcodeai.rate-limit.refill-per-minute 必须大于 0");
+            }
+        }
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public int getCapacity() {
+            return capacity;
+        }
+
+        public void setCapacity(int capacity) {
+            this.capacity = capacity;
+        }
+
+        public int getRefillPerMinute() {
+            return refillPerMinute;
+        }
+
+        public void setRefillPerMinute(int refillPerMinute) {
+            this.refillPerMinute = refillPerMinute;
+        }
+    }
+
+    /**
+     * 索引的**按仓库路径互斥锁**（Redis）。
+     *
+     * <p>它防的不是"同一个任务跑两次"（那是幂等管的），而是**同一个仓库路径被提交两次**：
+     * 两条不同的任务同时索引同一路径会互相"删了再插"，那是真会坏数据的。
+     * 单 worker 时不会发生（一个任务一个任务来），消费者并发数调到 2 以上才成为现实问题 ——
+     * 所以它跟"多 worker"是同一步的配套改动。
+     */
+    public static class Lock {
+
+        /** 关掉即退化为"不互斥"（单 worker 下没区别；多 worker + 关掉 = 自己承担并发索引同一仓库的风险）。 */
+        private boolean enabled = true;
+
+        /** 锁的 TTL：必须大于"一次索引"的耗时，否则锁会在索引中途过期。 */
+        private long ttlSeconds = 600;
+
+        /** 续期间隔：持有锁期间按这个间隔延长 TTL（索引可能跑几分钟）。 */
+        private long refreshSeconds = 180;
+
+        /** 等锁的超时：别人正在索引同一路径时最多等这么久，超时就失败并说清原因。 */
+        private long waitSeconds = 180;
+
+        void validate() {
+            if (ttlSeconds <= 0 || refreshSeconds <= 0 || waitSeconds <= 0) {
+                throw new IllegalStateException("readcodeai.lock.* 的三个秒数都必须大于 0");
+            }
+            if (refreshSeconds >= ttlSeconds) {
+                throw new IllegalStateException("readcodeai.lock.refresh-seconds 必须小于 ttl-seconds，"
+                        + "否则续期来不及（锁会在索引中途过期）");
+            }
+        }
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public long getTtlSeconds() {
+            return ttlSeconds;
+        }
+
+        public void setTtlSeconds(long ttlSeconds) {
+            this.ttlSeconds = ttlSeconds;
+        }
+
+        public long getRefreshSeconds() {
+            return refreshSeconds;
+        }
+
+        public void setRefreshSeconds(long refreshSeconds) {
+            this.refreshSeconds = refreshSeconds;
+        }
+
+        public long getWaitSeconds() {
+            return waitSeconds;
+        }
+
+        public void setWaitSeconds(long waitSeconds) {
+            this.waitSeconds = waitSeconds;
+        }
+    }
+
+    /**
+     * 索引任务的投递方式。
+     *
+     * <p>默认 {@link Mode#IN_PROCESS}：**没有 broker 的机器上项目照常跑**（与"没配 LLM / 没 Redis
+     * 也能跑"同一条纪律）。换 {@link Mode#RABBIT} 买到的是：任务持久化、重启后自动续跑、
+     * 消费者可扩到多个 —— 也就是 README 已知限制第 8 条那笔账。
+     */
+    public static class Queue {
+
+        public enum Mode {
+            /** 进程内队列（默认）：零依赖，代价是重启丢任务 */
+            IN_PROCESS,
+            /** RabbitMQ：任务不丢 + 可扩消费者 */
+            RABBIT
+        }
+
+        private Mode mode = Mode.IN_PROCESS;
+
+        private String name = "readcodeai.index.jobs";
+
+        /** 死信队列：消费失败的消息落到这里，而不是无限重投（要能一眼看见"哪些任务炸了"）。 */
+        private String dlqName = "readcodeai.index.jobs.dlq";
+
+        /**
+         * 消费者并发数（= 同时跑几个索引）。
+         *
+         * <p>默认 1（保守）。实测（2026-09-20）：三个仓库排队时并发 3 比并发 1 快约 1.6 倍
+         * （38 秒 → 24 秒）—— 早先"并发只会互相拖慢"的结论只在**单任务内**成立。
+         * 调大之前先确认仓库锁可用（{@code readcodeai.lock.enabled}）：多 worker + 无锁 = 同一仓库可能被并发索引。
+         */
+        private int concurrency = 1;
+
+        /** broker 探活超时：连不上就明确降级并告警，而不是让提交请求挂住。 */
+        private int connectTimeoutMs = 2000;
+
+        void validate() {
+            if (mode == null) {
+                throw new IllegalStateException("readcodeai.queue.mode 只能是 in-process / rabbit");
+            }
+            if (name == null || name.isBlank()) {
+                throw new IllegalStateException("readcodeai.queue.name 不能为空");
+            }
+            if (dlqName == null || dlqName.isBlank() || dlqName.equals(name)) {
+                throw new IllegalStateException("readcodeai.queue.dlq-name 不能为空、也不能和主队列同名");
+            }
+            if (concurrency <= 0) {
+                throw new IllegalStateException("readcodeai.queue.concurrency 必须大于 0");
+            }
+        }
+
+        public Mode getMode() {
+            return mode;
+        }
+
+        public void setMode(Mode mode) {
+            this.mode = mode;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+
+        public String getDlqName() {
+            return dlqName;
+        }
+
+        public void setDlqName(String dlqName) {
+            this.dlqName = dlqName;
+        }
+
+        public int getConcurrency() {
+            return concurrency;
+        }
+
+        public void setConcurrency(int concurrency) {
+            this.concurrency = concurrency;
+        }
+
+        public int getConnectTimeoutMs() {
+            return connectTimeoutMs;
+        }
+
+        public void setConnectTimeoutMs(int connectTimeoutMs) {
+            this.connectTimeoutMs = connectTimeoutMs;
+        }
     }
 
     /**

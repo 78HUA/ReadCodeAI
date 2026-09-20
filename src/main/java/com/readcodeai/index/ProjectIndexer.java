@@ -228,7 +228,7 @@ public class ProjectIndexer {
     }
 
     /** 压缩包名 → 安全的目录名：只留字母数字与点线，且不带头部的路径分隔符。 */
-    static String safeArchiveName(String originalFilename) {
+    public static String safeArchiveName(String originalFilename) {
         String base = originalFilename == null ? "" : originalFilename.replace('\\', '/');
         int slash = base.lastIndexOf('/');
         if (slash >= 0) {

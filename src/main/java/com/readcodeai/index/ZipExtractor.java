@@ -22,7 +22,7 @@ import java.util.zip.ZipInputStream;
  * <p><b>为什么要抽出来</b>：这段逻辑原本长在 {@link RepoFetcher} 里，而上传入口需要一模一样的两条约束。
  * 复制一份的下场是"改了一处忘了另一处"，而这里忘记改的代价是一个安全漏洞。
  */
-final class ZipExtractor {
+public final class ZipExtractor {
 
     /** 解压后总大小上限 2 GB。 */
     static final long MAX_EXTRACTED_BYTES = 2L * 1024 * 1024 * 1024;
@@ -35,7 +35,7 @@ final class ZipExtractor {
      *                               上传的压缩包常常也是"整个项目文件夹压进去"。
      *                               为 true 时剥掉最外层目录（条目里根本没有目录时不做任何事）
      */
-    static void extract(Path archive, Path destination, boolean stripTopLevelDirectory) throws IOException {
+    public static void extract(Path archive, Path destination, boolean stripTopLevelDirectory) throws IOException {
         Files.createDirectories(destination);
         long totalBytes = 0;
         try (ZipInputStream zip = new ZipInputStream(Files.newInputStream(archive))) {
@@ -76,7 +76,7 @@ final class ZipExtractor {
     }
 
     /** 清空目录（重新上传同一个项目时，不能把上一次留下的文件混进新索引）。 */
-    static void clearDirectory(Path directory) throws IOException {
+    public static void clearDirectory(Path directory) throws IOException {
         if (!Files.isDirectory(directory)) {
             Files.createDirectories(directory);
             return;
@@ -96,7 +96,7 @@ final class ZipExtractor {
      * <p>只有一层时才剥 —— 剥错了会把项目的真实结构弄丢（例如把 {@code src} 当成包装目录扔掉，
      * 结果一个 Java 文件都找不到，用户只会看到"索引出 0 个文件"）。
      */
-    static boolean hasSingleTopLevelDirectory(Path archive) throws IOException {
+    public static boolean hasSingleTopLevelDirectory(Path archive) throws IOException {
         String firstTop = null;
         boolean hasRootFile = false;
         try (ZipInputStream zip = new ZipInputStream(Files.newInputStream(archive))) {

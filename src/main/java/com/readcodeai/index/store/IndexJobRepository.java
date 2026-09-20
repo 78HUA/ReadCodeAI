@@ -112,6 +112,39 @@ public class IndexJobRepository {
                 """, message);
     }
 
+    /**
+     * MQ 模式下的对账：把上次进程留下的 RUNNING 任务改回 QUEUED —— **它们会随着消息重投自动接着跑**。
+     *
+     * <p>与 {@link #failUnfinishedJobs} 的差别就是"有没有队列"这件事本身：
+     * 进程内队列丢了就是丢了（只能标失败、让人重交），MQ 的消息没被 ack，重启后会被重新投递。
+     * 两条路径都留着，对照实验才做得出来。
+     */
+    public int requeueRunningJobs(String message) {
+        return jdbc.update("""
+                UPDATE `index_job`
+                   SET status = 'QUEUED', stage = 'QUEUED', message = ?, updated_at = NOW()
+                 WHERE status = 'RUNNING'
+                """, message);
+    }
+
+    /** 状态计数（队列实现用它报"正在跑几个"，跨实例也准）。 */
+    public Integer countByStatus(String status) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM `index_job` WHERE status = ?", Integer.class, status);
+    }
+
+    /**
+     * 排队超过 N 分钟还没被执行的 QUEUED 任务 —— 这是"消息可能丢了"的信号。
+     *
+     * <p>只**报告**不自动改状态：在 MQ 模式下别的地方可能正拿着这条消息，
+     * 自动标失败会把它变成"跑着跑着变失败"的鬼故事。巡检日志 + 人判断，比自作聪明安全。
+     */
+    public List<Long> findStaleQueued(int olderThanMinutes) {
+        return jdbc.queryForList("""
+                SELECT id FROM `index_job`
+                 WHERE status = 'QUEUED' AND updated_at < NOW() - INTERVAL ? MINUTE
+                """, Long.class, olderThanMinutes);
+    }
+
     /** 仓库行卡在 INDEXING 的一并对账（任务表与仓库表必须一致，否则界面自相矛盾）。 */
     public int failStaleRepos(String message) {
         return jdbc.update("""
@@ -127,8 +160,16 @@ public class IndexJobRepository {
             """;
 
     private IndexJob toJob(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
-        long repoId = rs.getLong("repo_id");
-        return new IndexJob(rs.getLong("id"), rs.wasNull() ? null : repoId,
+        // ⚠️ `wasNull()` 只反映**最近一次**读取的列 —— 必须紧接着 getLong 判断。
+        // 写成 `new IndexJob(rs.getLong("id"), rs.wasNull() ? null : repoId, ...)` 是错的：
+        // 参数从左到右求值，先读了 id，wasNull 就在回答"id 是不是 null"（永远 false），
+        // 于是 **repo_id = NULL 被读成 0**。旧代码不分支所以看不出；一旦有人写
+        // `job.repoId() == null ? 建仓库行 : 用它`（队列化之后就是这么写的），就会拿 0 去写外键、
+        // 报 "Cannot add or update a child row"（这个 bug 是队列化测试逼出来的）。
+        long id = rs.getLong("id");
+        long repoIdValue = rs.getLong("repo_id");
+        Long repoId = rs.wasNull() ? null : repoIdValue;
+        return new IndexJob(id, repoId,
                 rs.getString("kind"), rs.getString("source"), rs.getString("status"),
                 rs.getString("stage"), rs.getInt("done"), rs.getInt("total"),
                 rs.getString("message"),

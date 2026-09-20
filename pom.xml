@@ -30,6 +30,17 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
+        <!--
+            消息队列（RabbitMQ）：索引任务从"进程内队列"换成"持久化队列"。
+            换它的判据在 docs/design-outline.md 的选型表里，这里是那条判据**已经满足**：
+            索引任务重启就丢（README 已知限制第 8 条），而"不丢"正是 MQ 买得到的东西。
+            默认仍是 readcodeai.queue.mode=in-process：没有 broker 时项目照常可用（与 LLM / Redis 同一套降级纪律）。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-amqp</artifactId>
+        </dependency>
+
         <!-- Java 解析：符号表 / 调用图的来源。纯 Java，无 native 依赖 -->
         <dependency>
             <groupId>com.github.javaparser</groupId>

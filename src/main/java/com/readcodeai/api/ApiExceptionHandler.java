@@ -21,6 +21,13 @@ public class ApiExceptionHandler {
         return ApiResponse.error(404, e.getMessage());
     }
 
+    @ExceptionHandler(RateLimitedException.class)
+    @ResponseStatus(HttpStatus.TOO_MANY_REQUESTS)
+    ApiResponse<Void> onRateLimited(RateLimitedException e) {
+        // 429 的形状与其它错误一致（{code, message}），客户端不用为限流单独写一套解析
+        return ApiResponse.error(429, e.getMessage());
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ApiResponse<Void> badRequest(IllegalArgumentException e) {

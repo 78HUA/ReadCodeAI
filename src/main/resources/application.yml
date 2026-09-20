@@ -12,6 +12,18 @@ spring:
     init:
       # schema.sql 全部是 CREATE TABLE IF NOT EXISTS，重复启动安全
       mode: always
+  rabbitmq:
+    # 只在 readcodeai.queue.mode=rabbit 时才会被连接；默认模式（in-process）不碰 broker
+    host: ${READCODEAI_RABBIT_HOST:127.0.0.1}
+    port: ${READCODEAI_RABBIT_PORT:5672}
+    username: ${READCODEAI_RABBIT_USERNAME:guest}
+    password: ${READCODEAI_RABBIT_PASSWORD:guest}
+    connection-timeout: 2s
+    listener:
+      simple:
+        # 重试交给死信队列（消费失败 → DLQ），不做无脑重投：索引失败多是确定性原因，重试还是同一个结果
+        retry:
+          enabled: false
   data:
     redis:
       # 只从环境变量读；没起 Redis 时会降级为"不缓存"，不影响问答本身
@@ -76,6 +88,28 @@ readcodeai:
     # 实测 embedding-3 支持 dimensions 参数；1024 维比默认 2048 省一半内存
     dimensions: 1024
     batch-size: 16
+  queue:
+    # 索引任务的投递方式：in-process（默认，零依赖、重启丢任务）/ rabbit（持久化、重启续跑）
+    mode: ${READCODEAI_QUEUE_MODE:in-process}
+    name: readcodeai.index.jobs
+    dlq-name: readcodeai.index.jobs.dlq
+    # 同时跑几个索引：实测 3 个仓库排队时，并发 3 比并发 1 快（38 秒 → 24 秒）；默认保守取 1
+    concurrency: ${READCODEAI_QUEUE_CONCURRENCY:1}
+  lock:
+    # 按仓库路径的互斥锁（Redis）：防"同一个仓库被两个任务同时索引"（删了再插会互相拆台）
+    # 单 worker 时撞不上，多 worker（concurrency>1）时是必需品；Redis 不可用会告警但放行
+    enabled: true
+    # TTL 必须大于一次索引的耗时：索引可能几分钟，所以有下面的续期
+    ttl-seconds: 600
+    refresh-seconds: 180
+    # 等锁上限：别人正在索引同一路径时最多等这么久，超时就失败并说明原因
+    wait-seconds: 180
+  rate-limit:
+    # 会调模型的接口（/api/ask、/api/agent、/api/review、/api/summary）的令牌桶限流
+    # 桶容量 = 允许的突发；每分钟补充 = 稳态速率上限。Redis 挂了自动放行（保护件不升级成全站故障）
+    enabled: ${READCODEAI_RATE_LIMIT_ENABLED:true}
+    capacity: 10
+    refill-per-minute: 20
   retrieve:
     top-k: 8
     # 不把整个仓库塞进上下文

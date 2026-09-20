@@ -2,94 +2,90 @@ package com.readcodeai.index;
 
 import com.readcodeai.config.ReadCodeAiProperties;
 import com.readcodeai.index.model.IndexJob;
+import com.readcodeai.index.queue.IndexTask;
+import com.readcodeai.index.queue.IndexTaskQueue;
+import static com.readcodeai.index.queue.IndexTaskRunner.shortMessage;
 import com.readcodeai.index.store.IndexJobRepository;
-import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.amqp.AmqpException;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Service;
 
-import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Supplier;
+import java.util.List;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
- * 异步索引：**接单立刻返回，干活在后台，进度随时可查**。
+ * 异步索引的**提交侧**：接单、建任务、把任务交给队列，然后立刻返回。
  *
- * <h3>为什么必须异步</h3>
- * 索引是分钟级的长任务（实测 2.3 万行 16 秒，十万行就是分钟级）。原来它是同步的：
- * 一次 {@code POST /api/repos} 把 HTTP 请求挂十几秒到几分钟 —— 前端只能干等，
- * 网关一超时就断，客户端还以为失败了。
+ * <h3>职责边界（这次改造划清的）</h3>
+ * <ul>
+ *   <li>这里只管"**接单与投递**"：建 {@code index_job} 行（状态源）、建仓库行、把
+ *       {@link IndexTask} 交给 {@link IndexTaskQueue}。</li>
+ *   <li>"**怎么执行**"在 {@code IndexTaskRunner}（按类型复原步骤 + 幂等 + 写终态），
+ *       两种队列共用同一份 —— 所以"进程内 vs MQ"的对照实验里，差异只剩投递方式。</li>
+ * </ul>
  *
- * <h3>为什么先用进程内队列、不直接上 MQ</h3>
- * 这个场景真正需要的是"不阻塞 + 有进度"，而这两件事**进程内队列就够**。
- * MQ 额外买到的是"重启不丢 / 自动重试 / 多实例横向扩" —— 现在用不上，
- * 硬加只会让面试里的"为什么"答不顺（判据见 docs/design-outline.md 的选型表）。
- *
- * <p><b>它的代价必须说清</b>：进程重启 → 排队与运行中的任务**丢掉**。
- * 所以这里有 {@link #reconcileUnfinishedJobs()}：启动时把上次留下的任务如实标成失败，
- * 而不是让仓库永远卡在 INDEXING 骗人。这条代价就是将来换 MQ 的理由。
- *
- * <h3>并发度为什么是 1</h3>
- * 索引是 CPU + 磁盘密集型的，两个仓库同时跑只会互相拖慢，还抢数据库连接。
- * 队列容量 8：满了就明确拒绝（"已有索引任务在跑"），而不是无限堆积。
+ * <h3>两种模式的对账语义（差别就是"有没有队列"本身）</h3>
+ * <ul>
+ *   <li><b>in-process</b>：重启 → 排队与运行中的任务**丢了**，如实标成失败并提示重新提交。</li>
+ *   <li><b>rabbit</b>：重启 → 没被 ack 的消息会被**重新投递**，所以把 RUNNING 改回 QUEUED
+ *       （等重投），**不再标失败**；另外把"排队很久还没人执行"的任务报出来（消息可能真的丢了）。</li>
+ * </ul>
  */
 @Service
 public class AsyncIndexer implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(AsyncIndexer.class);
 
-    /** 进度写库的节流间隔：每个文件都写一次，对几千文件的仓库来说是纯浪费。 */
-    private static final long PROGRESS_THROTTLE_MS = 300;
-
     private static final String RESTARTED_MESSAGE =
             "应用在索引过程中重启：索引任务**不持久化**（进程内队列的代价），请重新提交";
 
+    private static final String REQUEUE_MESSAGE = "应用重启，等待消息队列重新投递";
+
+    /** 巡检阈值：排队超过这么久还没被执行，就值得怀疑消息丢了。 */
+    private static final int STALE_QUEUED_MINUTES = 10;
+
     private final ProjectIndexer indexer;
     private final IndexJobRepository jobs;
-    private final RepoFetcher repoFetcher;
+    private final IndexTaskQueue queue;
     private final ReadCodeAiProperties properties;
 
-    private final ThreadPoolExecutor executor = new ThreadPoolExecutor(
-            1, 1, 0L, TimeUnit.MILLISECONDS,
-            new ArrayBlockingQueue<>(8),
-            runnable -> {
-                Thread thread = new Thread(runnable, "index-worker");
-                thread.setDaemon(true);
-                return thread;
-            });
-
-    public AsyncIndexer(ProjectIndexer indexer, IndexJobRepository jobs, RepoFetcher repoFetcher,
+    public AsyncIndexer(ProjectIndexer indexer, IndexJobRepository jobs, IndexTaskQueue queue,
                         ReadCodeAiProperties properties) {
         this.indexer = indexer;
         this.jobs = jobs;
-        this.repoFetcher = repoFetcher;
+        this.queue = queue;
         this.properties = properties;
     }
 
-    /**
-     * 启动时对账：上次进程留下的 QUEUED/RUNNING 任务与卡在 INDEXING 的仓库，一并如实标成失败。
-     *
-     * <p>这里**不自动重跑**：重跑需要知道"任务从哪来、跑到哪一步了"，那是队列该干的事。
-     * 现在老老实实告诉使用者"请重新提交"，比假装什么都没发生强。
-     */
     @Override
     public void run(ApplicationArguments args) {
+        log.info("索引任务队列：{}", queue.describe());
         reconcileUnfinishedJobs();
     }
 
-    @PostConstruct
-    void logBootstrap() {
-        log.info("异步索引已启用：单 worker（索引是 CPU/磁盘密集型，并发跑只会互相拖慢）· 队列容量 8");
-    }
-
+    /**
+     * 启动对账：**按队列模式分别处理**（见类注释）。
+     *
+     * @return 被处理（标失败或被改回排队）的任务数
+     */
     public int reconcileUnfinishedJobs() {
+        if (properties.getQueue().getMode() == ReadCodeAiProperties.Queue.Mode.RABBIT) {
+            int requeued = jobs.requeueRunningJobs(REQUEUE_MESSAGE);
+            if (requeued > 0) {
+                log.info("启动对账：{} 个运行中的任务已改回排队 —— 消息没被 ack，队列会重新投递它们", requeued);
+            }
+            List<Long> stale = jobs.findStaleQueued(STALE_QUEUED_MINUTES);
+            if (!stale.isEmpty()) {
+                log.warn("有 {} 个任务排队超过 {} 分钟仍未被消费：{} —— 消息可能已丢失（检查 DLQ 与消费者），"
+                        + "需要的话请重新提交", stale.size(), STALE_QUEUED_MINUTES, stale);
+            }
+            return requeued;
+        }
+
         int staleJobs = jobs.failUnfinishedJobs(RESTARTED_MESSAGE);
         int staleRepos = jobs.failStaleRepos(RESTARTED_MESSAGE);
         if (staleJobs > 0 || staleRepos > 0) {
@@ -106,7 +102,7 @@ public class AsyncIndexer implements ApplicationRunner {
         long repoId = indexer.createPendingRepo(root, null);
         long jobId = jobs.create("LOCAL", root.toString());
         jobs.start(jobId, repoId, "QUEUED", "排队中");
-        submit(jobId, () -> indexer.indexInto(repoId, root, name(root), null, listenerFor(jobId)));
+        enqueue(new IndexTask(jobId, IndexTask.Type.LOCAL, root.toString()));
         return jobs.find(jobId).orElseThrow();
     }
 
@@ -114,108 +110,49 @@ public class AsyncIndexer implements ApplicationRunner {
     public IndexJob submitRemote(String gitUrl) {
         long jobId = jobs.create("GIT", gitUrl);
         jobs.start(jobId, null, "QUEUED", "排队中");
-        submit(jobId, () -> {
-            reporter(jobId).onProgress("FETCHING", 0, 0, "拉取 GitHub 源码包");
-            RepoFetcher.Fetched fetched = fetch(gitUrl);
-            long repoId = indexer.createPendingRepo(fetched.root(), fetched.commitHash());
-            jobs.start(jobId, repoId, "SCANNING", "已拉取，开始索引");
-            return indexer.indexInto(repoId, fetched.root(), name(fetched.root()), fetched.commitHash(),
-                    listenerFor(jobId));
-        });
+        enqueue(new IndexTask(jobId, IndexTask.Type.GIT, gitUrl));
         return jobs.find(jobId).orElseThrow();
     }
 
-    /** 提交一个**压缩包**索引任务：压缩包先落到工作区（快），解压与索引都在后台做。 */
+    /**
+     * 提交一个**压缩包**索引任务：压缩包先落到工作区（快），解压与索引都在后台做。
+     *
+     * <p>消息里带的是**工作区里的路径**（不是 HTTP 上传的临时文件）—— 否则进程重启后
+     * 消息还在、文件没了。多实例部署时这个路径必须在共享存储上（单机多 worker 不涉及）。
+     */
     public IndexJob submitArchive(Path archive, String originalFilename) {
-        long jobId = jobs.create("ARCHIVE", originalFilename == null ? archive.getFileName().toString() : originalFilename);
+        String label = originalFilename == null ? archive.getFileName().toString() : originalFilename;
+        long jobId = jobs.create("ARCHIVE", label);
         jobs.start(jobId, null, "QUEUED", "排队中");
-        submit(jobId, () -> {
-            reporter(jobId).onProgress("EXTRACTING", 0, 0, "解压压缩包");
-            Path root = extractArchive(archive, originalFilename);
-            long repoId = indexer.createPendingRepo(root, null);
-            jobs.start(jobId, repoId, "SCANNING", "已解压，开始索引");
-            return indexer.indexInto(repoId, root, name(root), null, listenerFor(jobId));
-        });
+        enqueue(new IndexTask(jobId, IndexTask.Type.ARCHIVE, archive.toString()));
         return jobs.find(jobId).orElseThrow();
     }
 
     /** 队列里还有多少任务（界面与测试都用得上）。 */
     public int queued() {
-        return executor.getQueue().size();
+        return queue.queued();
     }
 
-    /** 正在跑的任务数（0 或 1）。 */
+    /** 正在跑的任务数。 */
     public int running() {
-        return executor.getActiveCount();
-    }
-
-    private void submit(long jobId, Supplier<IndexSummary> work) {
-        try {
-            executor.execute(() -> {
-                try {
-                    IndexSummary summary = work.get();
-                    jobs.finish(jobId, "READY", "DONE", summary.fileCount() + " 个文件 · "
-                            + summary.symbolCount() + " 个符号 · " + summary.totalMillis() + " ms");
-                } catch (RuntimeException | LinkageError e) {
-                    // 任务失败要能看到原因：这就是"哪些仓库索引不了"的答案
-                    log.warn("索引任务 {} 失败：{}", jobId, e.toString());
-                    jobs.finish(jobId, "FAILED", "FAILED", e.getClass().getSimpleName() + ": " + e.getMessage());
-                }
-            });
-        } catch (java.util.concurrent.RejectedExecutionException e) {
-            // 队列满 = 明确的"忙"，而不是无限堆积（堆积只会让所有任务都变慢）
-            jobs.finish(jobId, "FAILED", "FAILED", "索引队列已满（最多 8 个排队），请稍后再提交");
-            throw new IllegalStateException("索引队列已满，请稍后再提交（当前排队 " + queued() + " 个）");
-        }
-    }
-
-    private RepoFetcher.Fetched fetch(String gitUrl) {
-        return repoFetcher.fetch(gitUrl, Path.of(properties.getIndex().getWorkspace()));
-    }
-
-    Path extractArchive(Path archive, String originalFilename) {
-        Path workspace = Path.of(properties.getIndex().getWorkspace()).resolve("uploads");
-        Path root = workspace.resolve(ProjectIndexer.safeArchiveName(originalFilename));
-        try {
-            ZipExtractor.clearDirectory(root);
-            ZipExtractor.extract(archive, root, ZipExtractor.hasSingleTopLevelDirectory(archive));
-            return root;
-        } catch (IOException e) {
-            throw new IllegalStateException("解压失败：" + e.getMessage(), e);
-        }
+        return queue.running();
     }
 
     /**
-     * 任务进度监听器：**写库前节流**。
-     *
-     * <p>解析阶段每个文件都会回调一次，几千个文件就有几千次写库 —— 那是给数据库白加负载。
-     * 这里按"间隔 300ms 或首尾各一次"写，界面上的观感不变，写入量掉两个数量级。
+     * 投递：两种队列的失败方式不一样，都要**明确**（任务表里看得见原因），不能悄悄吞掉。
      */
-    private ProgressListener listenerFor(long jobId) {
-        AtomicLong lastWrite = new AtomicLong(0);
-        return (stage, done, total, message) -> {
-            long now = System.currentTimeMillis();
-            boolean isStageChange = done <= 1 || (total > 0 && done >= total);
-            if (isStageChange || now - lastWrite.get() >= PROGRESS_THROTTLE_MS) {
-                lastWrite.set(now);
-                jobs.progress(jobId, stage, done, total, shortMessage(message));
-            }
-        };
-    }
-
-    /** 给"上报前还不知道任务 id"的阶段用（拉取/解压）。 */
-    private ProgressListener reporter(long jobId) {
-        return (stage, done, total, message) -> jobs.progress(jobId, stage, done, total, shortMessage(message));
-    }
-
-    static String shortMessage(String message) {
-        if (message == null) {
-            return null;
+    private void enqueue(IndexTask task) {
+        try {
+            queue.enqueue(task);
+        } catch (RejectedExecutionException e) {
+            // 进程内队列满了 = 明确的"忙"，而不是无限堆积（堆积只会让所有任务都变慢）
+            jobs.finish(task.jobId(), "FAILED", "FAILED", "索引队列已满（最多 8 个排队），请稍后再提交");
+            throw new IllegalStateException("索引队列已满，请稍后再提交（当前排队 " + queue.queued() + " 个）");
+        } catch (AmqpException e) {
+            // broker 不可达：任务没被投出去，如实失败并给出可操作的提示（换模式或修 broker）
+            jobs.finish(task.jobId(), "FAILED", "FAILED", shortMessage("消息中间件不可达：" + e.getMessage()));
+            throw new IllegalStateException("消息中间件（RabbitMQ）不可达，任务未投递："
+                    + "请检查 broker，或把 readcodeai.queue.mode 改回 in-process");
         }
-        return message.length() <= 240 ? message : message.substring(0, 240);
-    }
-
-    private static String name(Path root) {
-        return root.getFileName() == null ? root.toString() : root.getFileName().toString();
     }
 }

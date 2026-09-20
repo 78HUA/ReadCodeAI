@@ -1,5 +1,7 @@
 # ReadCodeAI
 
+![test](https://github.com/78HUA/ReadCodeAI/actions/workflows/test.yml/badge.svg)
+
 给一个 GitHub 仓库或本地代码库，它先告诉你**这个库是干什么的**，然后你可以接着追问代码里的问题。
 每条结论都带「文件 + 行号 + 原文片段」的证据，**点开就是磁盘上的真实代码** ——
 编造的路径、行号或片段过不了核验，会被挡下来，而不是原样递给你。
@@ -231,7 +233,27 @@ export READCODEAI_LLM_API_KEY=...
 mvn test -Dreadcodeai.verify.repo=/path/to/a/java/repo
 ```
 
-当前：**183 个测试 · 0 失败 · 6 跳过**（跳过的是网络用例、与语料相关的可选断言、模型接口不可达、broker/Redis 不在、以及默认不跑的大仓库基准）。
+当前：**187 个测试 · 0 失败 · 6 跳过**（跳过的是网络用例、与语料相关的可选断言、模型接口不可达、broker/Redis 不在、以及默认不跑的大仓库基准）。
+
+### 持续集成
+
+每次 push 到 `main`（或提 PR）会由 GitHub Actions 自动跑一遍**离线测试集**（约 2 分钟）：
+
+```bash
+mvn -B test -Dreadcodeai.verify.repo=.     # 语料用这个项目自己：零下载、零合规风险
+```
+
+配置在 [`.github/workflows/test.yml`](.github/workflows/test.yml)：GitHub 免费提供 Linux 机器，
+MySQL 8 与 Redis 用临时容器起在旁边，跑完即销毁。
+
+**CI 里刻意不放 API Key**，因此**会调模型的用例会自动跳过**（它们本来就有"没配模型就跳过"的门禁），
+于是 CI 天然只跑离线集：
+
+| 在哪跑 | 跑什么 | 为什么 |
+|---|---|---|
+| **CI（每次 push）** | 离线集（约 2 分钟） | 快、确定、不花钱；把"跑不过就别提交"交给机器 |
+| 本地（开发时） | 定向用例（`-Dtest=...`，几秒到几十秒） | 改哪儿测哪儿 |
+| 本地（里程碑） | 全量（含真实模型，约 12 分钟） | 要更新验证记录里的实测数字时才跑 |
 
 ## 实测与已知限制
 

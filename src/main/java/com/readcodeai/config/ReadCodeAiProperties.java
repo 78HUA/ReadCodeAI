@@ -605,6 +605,15 @@ public class ReadCodeAiProperties {
          */
         private int parseThreads = 0;
 
+        /**
+         * 索引收尾时重建全文索引的**检索单元阈值**：本次索引的 chunk 数达到它才做。
+         *
+         * <p>为什么需要：重复索引会在 InnoDB 的 ngram 全文索引里留碎片，实测能把一个检索
+         * 从 65 ms 拖到 13 秒（200 倍）。重建一次几百毫秒，但会重建整张 chunk 表 ——
+         * 所以小仓库不值得，大仓库必须做。{@code 0} = 关闭（自己做维护）。
+         */
+        private int optimizeFulltextThreshold = 200;
+
         void validate() {
             if (maxFileSizeKb <= 0) {
                 throw new IllegalStateException("readcodeai.index.max-file-size-kb 必须大于 0");
@@ -612,10 +621,22 @@ public class ReadCodeAiProperties {
             if (workspace == null || workspace.isBlank()) {
                 throw new IllegalStateException("readcodeai.index.workspace 不能为空");
             }
+            if (optimizeFulltextThreshold < 0) {
+                throw new IllegalStateException("readcodeai.index.optimize-fulltext-threshold 不能为负数"
+                        + "（0 = 关闭）");
+            }
             if (parseThreads < 0) {
                 throw new IllegalStateException("readcodeai.index.parse-threads 不能为负数"
                         + "（0 = 自动，1 = 串行），当前为 " + parseThreads);
             }
+        }
+
+        public int getOptimizeFulltextThreshold() {
+            return optimizeFulltextThreshold;
+        }
+
+        public void setOptimizeFulltextThreshold(int optimizeFulltextThreshold) {
+            this.optimizeFulltextThreshold = optimizeFulltextThreshold;
         }
 
         public int getParseThreads() {

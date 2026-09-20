@@ -66,6 +66,8 @@ readcodeai:
     max-file-size-kb: 2048
     # 解析并行度：0 = 自动（核数与 8 取小），1 = 串行（并行改动的对照组，也是逃生门）
     parse-threads: 0
+    # 索引收尾时重建全文索引的阈值（检索单元数）。碎片会把检索从 65ms 拖到 13 秒；0 = 关闭
+    optimize-fulltext-threshold: 200
     # 远程仓库拉取后的存放目录（放在用户目录下，免得把下载的第三方代码混进项目工作区）
     workspace: ${user.home}/.readcodeai/repos
     exclude-patterns:

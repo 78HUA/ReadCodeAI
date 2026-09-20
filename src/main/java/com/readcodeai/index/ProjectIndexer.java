@@ -296,6 +296,17 @@ public class ProjectIndexer {
                     stored.filesMs(), stored.symbolsMs(), stored.callsMs(), stored.relationsMs(),
                     stored.chunksMs(), stored.otherMs(), storeMillis);
 
+            // 全文索引维护：碎片是索引过程自己产生的，收尾时按需重建（详见 IndexRepository 的注释）
+            int chunkTotal = analyzed.chunks().size() + stored.textChunkCount();
+            int optimizeThreshold = properties.getIndex().getOptimizeFulltextThreshold();
+            if (optimizeThreshold > 0 && chunkTotal >= optimizeThreshold) {
+                long optimizeStart = System.nanoTime();
+                repository.optimizeFulltextIndex();
+                log.info("全文索引已重建（{} 个检索单元 · 耗时 {} ms）：重复索引会留碎片，"
+                                + "实测能把检索从 65 ms 拖到 13 秒",
+                        chunkTotal, (System.nanoTime() - optimizeStart) / 1_000_000);
+            }
+
             int totalLoc = analyzed.files().stream().mapToInt(FileOutcome::loc).sum();
             int resolvedEdges = (int) edgeable.stream().filter(CollectedCall::resolved).count();
             IndexSummary summary = new IndexSummary(repoId, name, root.toString(), commitHash,

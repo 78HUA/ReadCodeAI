@@ -84,7 +84,8 @@ public class VectorComparison {
 
         // B 方：现有路由（确定性题型不经模型，位置由符号表/调用图算出）
         long routeStart = System.nanoTime();
-        AskAnswer answer = answerService.ask(repoId, question.questionText(), null, TOP_K);
+        // 同样是"我们自己跑的题"：走真实流水线，但流水里标成 EVAL（不计入用户问答统计）
+        AskAnswer answer = answerService.askForEval(repoId, question.questionText(), TOP_K);
         long routeMillis = (System.nanoTime() - routeStart) / 1_000_000;
         AutoGrader.Grade routeGrade = AutoGrader.gradeKeys(question, AutoGrader.claimedKeys(answer));
 

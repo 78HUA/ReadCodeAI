@@ -18,6 +18,7 @@ import com.readcodeai.retrieve.VectorRetriever;
 import com.readcodeai.retrieve.model.RepoView;
 import com.readcodeai.verify.HashEmbeddingClient;
 import com.readcodeai.verify.TestCheckers;
+import com.readcodeai.verify.TestAnswerLogs;
 import com.readcodeai.verify.TestCorpus;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -95,7 +96,7 @@ class VectorComparisonTest {
         // 确定性路由专用：五类评估题都不该碰模型
         AnswerService routesOnly = new AnswerService(textRetriever, queries, queryRouter, contextSelector,
                 evidenceVerifier, evidenceRepair, TestCheckers.NONE,
-                new ScriptedLlmClient(MUST_NOT_BE_CALLED), properties);
+                new ScriptedLlmClient(MUST_NOT_BE_CALLED), properties, TestAnswerLogs.silent(properties));
 
         List<GeneratedQuestion> questions = generator.generate(repoId, SEED, PER_TYPE);
         assumeTrue(questions.size() >= 8, "语料里可出的题太少，跳过");

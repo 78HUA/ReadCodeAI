@@ -1,12 +1,13 @@
 <script setup>
-// ④ 指标：一键跑评估集。
+// ④ 指标：**两块账，分开说**。
 //
-// 这一页存在的意义不是"数字好看"，而是**把评估的边界写在数字旁边**：
-// 自动出题与自动判卷用的都是确定性问题（答案由静态分析算出），
-// 所以它测的是管线自洽与回归，不是开放问答的准确率 —— 这句话必须和 100% 一起出现，
-// 否则那个 100% 就是在骗人。
-import { ref } from 'vue'
-import { api, rate } from '../api.js'
+// 上面一块（运行统计）是真实问答的流水：每问一次记一行（路线、token、耗时、拒答、证据核验）。
+// 下面一块（自动评估）是机器给自己打的卷：题从索引出、答案也从索引答。
+//
+// 这两块必须分开显示 —— 把"管线自洽的命中率"和"真实使用的成本账"混成一个数字，
+// 就是把两件不同的事说成一件。
+import { onMounted, ref, watch } from 'vue'
+import { api, formatMs, formatNumber, formatPercent, rate } from '../api.js'
 
 const props = defineProps({ repoId: Number })
 
@@ -15,6 +16,26 @@ const seed = ref(20260918)
 const report = ref(null)
 const busy = ref(false)
 const error = ref('')
+
+// 运行统计（一进页面就加载，不依赖"跑一次评估"）
+const stats = ref(null)
+const statsError = ref('')
+const statsBusy = ref(false)
+
+async function loadStats() {
+  statsBusy.value = true
+  statsError.value = ''
+  try {
+    stats.value = await api.metrics(props.repoId)
+  } catch (e) {
+    statsError.value = e.message
+  } finally {
+    statsBusy.value = false
+  }
+}
+
+onMounted(loadStats)
+watch(() => props.repoId, loadStats)
 
 async function run() {
   busy.value = true
@@ -28,6 +49,12 @@ async function run() {
   }
 }
 
+const modeLabels = {
+  STATIC: '静态（查表算出，不经模型）',
+  SINGLE_HOP: '单跳（一次检索 + 模型）',
+  MULTI_HOP: '多跳（模型自主跳转）'
+}
+
 const typeLabels = {
   LOCATE: '定位题（在哪定义）',
   CALLERS: '调用者题（谁调用了它）',
@@ -38,6 +65,57 @@ const typeLabels = {
 </script>
 
 <template>
+  <div class="panel">
+    <h2>运行统计</h2>
+    <p class="hint">
+      这一块与下面的自动评估<strong>不是一回事</strong>：自动评估是机器给自己打的卷（题目与判卷都由程序来）；
+      这里的数字来自<strong>真实问答的流水</strong> —— 每问一次记一行：走了哪条路、花了多少 token、
+      多久、有没有拒答、证据核验结果。没答上来的问题也照样记账。
+    </p>
+    <div v-if="statsError" class="error" style="margin-top: 12px">{{ statsError }}</div>
+    <template v-if="stats">
+      <div class="grid">
+        <div class="stat"><div class="k">累计问答</div><div class="v">{{ formatNumber(stats.userQuestions) }}</div>
+          <div class="s">其中 {{ stats.cacheHits }} 次命中缓存<template v-if="stats.evalQuestions"> ·
+            另有评估跑题 {{ stats.evalQuestions }} 次（不计入）</template></div></div>
+        <div class="stat"><div class="k">拒答率</div>
+          <div class="v">{{ formatPercent(rate(stats.refusals, stats.userQuestions)) }}</div>
+          <div class="s">{{ stats.refusals }} / {{ stats.userQuestions }}</div></div>
+        <div class="stat"><div class="k">实际花费 token</div>
+          <div class="v">{{ formatNumber(stats.promptTokens + stats.completionTokens + stats.supportTokens) }}</div>
+          <div class="s">含 ③ 层核验 {{ formatNumber(stats.supportTokens) }}</div></div>
+        <div class="stat"><div class="k">估算成本</div><div class="v">{{ stats.cost.toFixed(4) }}</div>
+          <div class="s">按配置单价，免费档恒为 0</div></div>
+        <div class="stat"><div class="k">缓存省下</div><div class="v">{{ formatNumber(stats.savedTokens) }}</div>
+          <div class="s">token（没有再生成一遍）</div></div>
+        <div class="stat"><div class="k">平均耗时</div><div class="v">{{ formatMs(stats.avgLatencyMs) }}</div>
+          <div class="s">最慢 {{ formatMs(stats.maxLatencyMs) }}</div></div>
+        <div class="stat"><div class="k">证据采纳</div><div class="v">{{ formatNumber(stats.evidenceVerified) }}</div>
+          <div class="s">首轮被拦下 {{ stats.evidenceRejected }} 条</div></div>
+      </div>
+      <h3>按路线</h3>
+      <table>
+        <thead>
+          <tr><th>路线</th><th class="num">次数</th><th class="num">拒答</th><th class="num">平均耗时</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="row in stats.byMode" :key="row.mode">
+            <td>{{ modeLabels[row.mode] || row.mode }}</td>
+            <td class="num">{{ row.count }}</td>
+            <td class="num">{{ row.refusals }}</td>
+            <td class="num">{{ formatMs(row.avgLatencyMs) }}</td>
+          </tr>
+          <tr v-if="!stats.byMode.length"><td colspan="4" class="small muted">还没有问答记录</td></tr>
+        </tbody>
+      </table>
+      <p class="small muted">
+        口径：统计范围是库里现存的流水（删仓库会连它的问答记录一起删），且<strong>只算用户提问</strong> ——
+        评估集跑题单独计数；缓存命中那一次没有再花 token，所以单独算在「缓存省下」里；
+        ③ 层核验的用量与生成分开记。
+      </p>
+    </template>
+  </div>
+
   <div class="panel">
     <h2>自动评估</h2>
     <p class="hint">

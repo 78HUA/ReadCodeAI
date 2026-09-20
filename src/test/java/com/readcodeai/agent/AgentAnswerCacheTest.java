@@ -232,9 +232,11 @@ class AgentAnswerCacheTest {
 
     private AgentService serviceWith(ScriptedLlmClient client, AnswerCache cache) {
         AnswerService singleHop = new AnswerService(textRetriever, queries, queryRouter, contextSelector,
-                evidenceVerifier, evidenceRepair, com.readcodeai.verify.TestCheckers.NONE, client, properties);
+                evidenceVerifier, evidenceRepair, com.readcodeai.verify.TestCheckers.NONE, client, properties,
+                com.readcodeai.verify.TestAnswerLogs.silent(properties));
         return new AgentService(singleHop, new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, client, 2),
-                queryRouter, queries, client, cache, properties);
+                queryRouter, queries, client, cache, properties,
+                com.readcodeai.verify.TestAnswerLogs.silent(properties));
     }
 
     private SymbolView firstWithCallers(long repoId) {

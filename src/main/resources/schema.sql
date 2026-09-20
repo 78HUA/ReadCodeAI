@@ -250,3 +250,55 @@ CREATE TABLE IF NOT EXISTS chunk_embedding
     CONSTRAINT fk_chunk_vector_chunk FOREIGN KEY (chunk_id) REFERENCES chunk (id) ON DELETE CASCADE
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT 'chunk 向量缓存（第 3 层检索基线）';
+
+-- 13. answer_log：每次问答的流水 —— **质量与成本的账**。
+--
+-- 为什么值得单独一张表：评估集（question / eval_run）记的是「自动出题的判卷结果」，
+-- 那是机器给自己打的卷；**「这个服务被问了多少次、花了多少 token、拒答了多少」**
+-- 从任何现有表都推不出来。有了它，「④ 指标」页才能把两者分开说。
+--
+-- 为什么 repo_id 级联删除：问答流水是**某个仓库的数据**，删仓库就该连它一起清
+-- （测试造的临时仓库也因此不会把统计数字撑起来）。
+--
+-- 为什么 question_id 没有外键：评估集跑题也走同一条问答流水线，那些行关联到 question.id；
+-- 但流水是**账本**，不该因为题目被重新生成/清理而被改写或导致写入失败 —— 关联关系记在值里即可。
+--
+-- 为什么还要一列 source：题目目前**不落库**（评估集现场出题、现场判卷），拿不到 question.id，
+-- 于是用 source 直接说明"这次是谁问的"。它的用处很实际：跑一次评估就是 200+ 行流水，
+-- 不标出来，页面上的"累计问答"就被评估跑题撑起来了（那不是用户提问）。
+--
+-- 口径（页面与文档都要照这个说）：**cache_hit=1 的行不代表这次花了 token**，
+-- 它记的是「这份答案当初生成花了多少、这次省下了」；所以
+-- 「实际花费」= SUM(...) WHERE cache_hit = 0，「省下的」= SUM(...) WHERE cache_hit = 1。
+CREATE TABLE IF NOT EXISTS answer_log
+(
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    repo_id           BIGINT         NULL COMMENT '归属仓库；删仓库级联删除',
+    question_id       BIGINT         NULL COMMENT '评估集跑题时关联 question.id；用户自己提问为空',
+    source            VARCHAR(8)     NOT NULL DEFAULT 'USER' COMMENT 'USER = 用户提问；EVAL = 评估集/对比实验跑题（不计入用户问答统计）',
+    question          VARCHAR(512)   NOT NULL,
+    mode              VARCHAR(16)    NOT NULL COMMENT 'STATIC / SINGLE_HOP / MULTI_HOP：实际走的路线',
+    answered_by       VARCHAR(8)     NOT NULL COMMENT 'STATIC / LLM / NONE：答案由谁给出',
+    route_json        VARCHAR(1024)  NULL COMMENT '确定性路由的路线与命中的目标符号',
+    hops              INT            NOT NULL DEFAULT 0 COMMENT '多跳轮次；单跳与静态路线为 0',
+    prompt_tokens     INT            NOT NULL DEFAULT 0,
+    completion_tokens INT            NOT NULL DEFAULT 0,
+    -- ③ 层核验是**另一笔账**（它自己也是一次模型调用）：
+    -- 生成答案花了多少与核验这条答案花了多少，混在一列里就两个都说不清（见 SupportCheck 的注释）
+    support_prompt_tokens     INT NOT NULL DEFAULT 0,
+    support_completion_tokens INT NOT NULL DEFAULT 0,
+    cost              DECIMAL(12, 6) NOT NULL DEFAULT 0 COMMENT '估算成本 = 生成 + 核验（同一单价；免费档恒为 0）',
+    latency_ms        BIGINT         NOT NULL DEFAULT 0,
+    evidence_verified INT            NOT NULL DEFAULT 0 COMMENT '最终采纳的证据条数',
+    evidence_rejected INT            NOT NULL DEFAULT 0 COMMENT '①② 层拦下的条数（首轮未过；可能被定向修正救回）',
+    support_status    VARCHAR(16)    NULL COMMENT '③ 层判定：SUPPORTED / UNSUPPORTED / UNAVAILABLE / NOT_CHECKED',
+    refused           TINYINT(1)     NOT NULL DEFAULT 0,
+    refusal_reason    VARCHAR(512)   NULL,
+    cache_hit         TINYINT(1)     NOT NULL DEFAULT 0 COMMENT '1 = 本次取缓存，没有重新生成',
+    answer_json       MEDIUMTEXT     NULL COMMENT '答案 + 证据 + 轨迹摘要（事后回溯用）',
+    created_at        DATETIME       NOT NULL,
+    KEY idx_answer_log_repo (repo_id, created_at),
+    KEY idx_answer_log_created (created_at),
+    CONSTRAINT fk_answer_log_repo FOREIGN KEY (repo_id) REFERENCES repo (id) ON DELETE CASCADE
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci COMMENT '问答流水：质量与成本（每次问答一行）';

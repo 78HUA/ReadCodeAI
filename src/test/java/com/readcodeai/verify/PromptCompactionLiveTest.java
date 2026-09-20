@@ -153,7 +153,7 @@ class PromptCompactionLiveTest {
                 keepFullObservations);
         return new AgentService(answerService, loop, queryRouter, queries, llmClient,
                 new NoopAnswerCache("A/B 实验必须禁用缓存：否则第二组会命中第一组的答案、token 变成 0"),
-                properties);
+                properties, TestAnswerLogs.silent(properties));
     }
 
     /** 挑**小链路**的题：真值比直接调用者多、但规模可控（与第三组实验同一套题源）。 */

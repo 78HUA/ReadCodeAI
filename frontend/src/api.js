@@ -65,7 +65,10 @@ export const api = {
   search: (repoId, q) => request(`/api/search?repoId=${repoId}&q=${encodeURIComponent(q)}`),
 
   runEval: (repoId, seed, perType) =>
-    request('/api/eval/run', { method: 'POST', body: JSON.stringify({ repoId, seed, perType }) })
+    request('/api/eval/run', { method: 'POST', body: JSON.stringify({ repoId, seed, perType }) }),
+
+  // 运行统计：问答流水的累计（真实使用，不是自动评估）。不传 repoId = 全部仓库
+  metrics: (repoId) => request(`/api/metrics${repoId ? `?repoId=${repoId}` : ''}`)
 }
 
 export function formatMs(ms) {

@@ -303,7 +303,8 @@ class SupportCheckerTest {
 
     private AnswerService answerServiceWith(LlmClient client, SupportChecker checker) {
         return new AnswerService(textRetriever, queries, queryRouter, contextSelector,
-                evidenceVerifier, evidenceRepair, checker, client, properties);
+                evidenceVerifier, evidenceRepair, checker, client, properties,
+                com.readcodeai.verify.TestAnswerLogs.silent(properties));
     }
 
     private RepoView corpus() {

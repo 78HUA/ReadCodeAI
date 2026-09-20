@@ -146,7 +146,8 @@ class AgentServiceTest {
         AgentService service = new AgentService(answerService,
                 new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, new NoopLlmClient("测试：未配置"), 2),
                 queryRouter, queries, new NoopLlmClient("测试：未配置"),
-                new com.readcodeai.agent.cache.NoopAnswerCache("测试"), properties);
+                new com.readcodeai.agent.cache.NoopAnswerCache("测试"), properties,
+                com.readcodeai.verify.TestAnswerLogs.silent(properties));
         RepoView repo = corpus();
 
         assertThatThrownBy(() -> service.ask(repo.id(), "这个参数是从哪来的？", AgentMode.MULTI_HOP, null, 8))
@@ -163,10 +164,11 @@ class AgentServiceTest {
      */
     private AgentService serviceWith(LlmClient client) {
         AnswerService singleHop = new AnswerService(textRetriever, queries, queryRouter, contextSelector,
-                evidenceVerifier, evidenceRepair, com.readcodeai.verify.TestCheckers.NONE, client, properties);
+                evidenceVerifier, evidenceRepair, com.readcodeai.verify.TestCheckers.NONE, client, properties,
+                com.readcodeai.verify.TestAnswerLogs.silent(properties));
         return new AgentService(singleHop, new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, client, 2),
                 queryRouter, queries, client, new com.readcodeai.agent.cache.NoopAnswerCache("测试"),
-                properties);
+                properties, com.readcodeai.verify.TestAnswerLogs.silent(properties));
     }
 
     private SymbolView firstWithCallers(long repoId) {

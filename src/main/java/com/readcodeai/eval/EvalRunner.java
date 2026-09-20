@@ -113,7 +113,9 @@ public class EvalRunner {
     private ItemResult runOne(long repoId, GeneratedQuestion question) {
         long start = System.nanoTime();
         try {
-            AskAnswer answer = answerService.ask(repoId, question.questionText(), null, 8);
+            // 走**同一条问答流水线**，只是流水里标成 EVAL：评估测的必须是真实流程，
+            // 但"累计问答"是给用户看的账，不该被评估跑题撑起来
+            AskAnswer answer = answerService.askForEval(repoId, question.questionText(), 8);
             long latency = (System.nanoTime() - start) / 1_000_000;
             if (answer.refused()) {
                 return new ItemResult(question, true, false, null, latency,

@@ -12,6 +12,7 @@ import com.readcodeai.retrieve.QueryRouter;
 import com.readcodeai.retrieve.SymbolQueryService;
 import com.readcodeai.retrieve.TextRetriever;
 import com.readcodeai.retrieve.model.SymbolView;
+import com.readcodeai.verify.TestAnswerLogs;
 import com.readcodeai.verify.TestCheckers;
 import com.readcodeai.verify.TestCorpus;
 import org.junit.jupiter.api.Test;
@@ -107,7 +108,8 @@ class AskServiceDegradationTest {
             }
         };
         AnswerService service = new AnswerService(textRetriever, queries, queryRouter, contextSelector,
-                evidenceVerifier, evidenceRepair, TestCheckers.NONE, broken, properties);
+                evidenceVerifier, evidenceRepair, TestCheckers.NONE, broken, properties,
+                TestAnswerLogs.silent(properties));
 
         // 题面里带真实标识符：纯中文问句在英文语料上会先因"检索为空"拒答，那就测不到模型这一步了
         AskAnswer answer = service.ask(repoId,

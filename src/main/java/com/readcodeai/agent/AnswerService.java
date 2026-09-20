@@ -1,5 +1,7 @@
 package com.readcodeai.agent;
 
+import com.readcodeai.agent.log.AnswerLogService;
+import com.readcodeai.agent.log.AnswerLogSource;
 import com.readcodeai.agent.model.AnsweredBy;
 import com.readcodeai.agent.model.AskAnswer;
 import com.readcodeai.agent.model.AskEvidence;
@@ -70,6 +72,7 @@ public class AnswerService {
     private final SupportChecker supportChecker;
     private final LlmClient llmClient;
     private final ReadCodeAiProperties properties;
+    private final AnswerLogService answerLogService;
 
     public AnswerService(TextRetriever textRetriever,
                          SymbolQueryService symbolQueryService,
@@ -79,7 +82,8 @@ public class AnswerService {
                          EvidenceRepair evidenceRepair,
                          SupportChecker supportChecker,
                          LlmClient llmClient,
-                         ReadCodeAiProperties properties) {
+                         ReadCodeAiProperties properties,
+                         AnswerLogService answerLogService) {
         this.textRetriever = textRetriever;
         this.symbolQueryService = symbolQueryService;
         this.queryRouter = queryRouter;
@@ -89,6 +93,7 @@ public class AnswerService {
         this.supportChecker = supportChecker;
         this.llmClient = llmClient;
         this.properties = properties;
+        this.answerLogService = answerLogService;
     }
 
     /**
@@ -96,7 +101,23 @@ public class AnswerService {
      *                  缩小问题空间便于定位问题。
      */
     public AskAnswer ask(Long repoId, String question, String scopePath, Integer topK) {
-        long start = System.nanoTime();
+        return ask(repoId, question, scopePath, topK, AnswerLogSource.USER);
+    }
+
+    /**
+     * 评估集 / 对比实验的跑题：**同一条问答流水线**，只在流水里标成 {@code EVAL}。
+     *
+     * <p>为什么不另走一条简化路径：那样评估测的就不是真实的问答流程了。
+     * 又不愿意不记账：跑一次评估就是 200+ 行，页面上的"累计问答"会被它撑起来。
+     * 标出来即可两全 —— 两块账分开算（见 {@code AnswerLogStats}）。
+     */
+    public AskAnswer askForEval(Long repoId, String question, Integer topK) {
+        return ask(repoId, question, null, topK, AnswerLogSource.EVAL);
+    }
+
+    private AskAnswer ask(Long repoId, String question, String scopePath, Integer topK,
+                          AnswerLogSource source) {
+        long startNanos = System.nanoTime();
         if (question == null || question.isBlank()) {
             throw new IllegalArgumentException("问题不能为空");
         }
@@ -109,12 +130,34 @@ public class AnswerService {
         // 让模型去"组织"它，等于把确定性换成不确定性。
         QueryRouter.Routed routed = queryRouter.route(effectiveRepoId, question,
                 SymbolLookups.of(symbolQueryService, effectiveRepoId));
+
+        AskAnswer answer;
+        String mode;
         if (routed.isDeterministic()) {
             log.info("问题走确定性路线：route={} targets={}", routed.route(), routed.targets().size());
-            return answerDeterministically(routed, repoRoot, elapsedMillis(start));
+            mode = "STATIC";
+            answer = answerDeterministically(routed, repoRoot, elapsedMillis(startNanos));
+        } else {
+            mode = "SINGLE_HOP";
+            answer = answerSemantically(effectiveRepoId, question, scopePath, topK, repoRoot, startNanos);
         }
 
-        // 走到这里才需要模型；没配就按降级处理（静态分析那几层照常可用）
+        // 记账放在**唯一的出口**上：静态 / 语义 / 检索为空 / 模型故障 / 各种拒答，
+        // 出来的都是上面两次调用的返回值 —— 只写这一处，才不会出现"某条路忘了记"。
+        answerLogService.recordAsk(effectiveRepoId, null, source, question, mode,
+                AnswerLogService.routeJson(routed), answer);
+        return answer;
+    }
+
+    /**
+     * 语义路线（单跳）：检索 → 模型组织语言 → 证据核验 → 必要时定向修正。
+     *
+     * <p>与确定性路线的分界在上面的 {@link #ask}：走到这里，说明问题没被路由成
+     * 「查表就能答」的那几类，必须靠检索 + 模型。
+     */
+    private AskAnswer answerSemantically(long repoId, String question, String scopePath, Integer topK,
+                                         Path repoRoot, long startNanos) {
+        // 没配模型就按降级处理（静态分析那几层照常可用）
         if (!llmClient.available()) {
             throw new LlmUnavailableException("未配置 LLM（readcodeai.llm.*），语义问答不可用；"
                     + "定位 / 调用关系 / 实现类 / 全文检索等确定性能力不受影响");
@@ -122,7 +165,7 @@ public class AnswerService {
 
         int limit = topK != null && topK > 0 ? topK : properties.getRetrieve().getTopK();
         // 先多召回、再由选片决定留哪些：固定只取 8 条时，去重/多样性/预算这些规则根本轮不到生效
-        List<ChunkHit> hits = textRetriever.search(effectiveRepoId, question, limit * CANDIDATE_MULTIPLIER);
+        List<ChunkHit> hits = textRetriever.search(repoId, question, limit * CANDIDATE_MULTIPLIER);
         if (scopePath != null && !scopePath.isBlank()) {
             String scope = scopePath.replace('\\', '/');
             hits = hits.stream().filter(hit -> hit.filePath().contains(scope)).toList();
@@ -142,7 +185,7 @@ public class AnswerService {
 
         if (selected.isEmpty()) {
             return AskAnswer.refused("在索引里没有检索到与该问题相关的代码片段",
-                    retrievedFrom, 0, elapsedMillis(start));
+                    retrievedFrom, 0, elapsedMillis(startNanos));
         }
 
         LlmClient.Completion completion;
@@ -157,7 +200,7 @@ public class AnswerService {
                     "模型调用失败（" + e.getClass().getSimpleName() + "：" + e.getMessage()
                             + "）。这是调用故障，不是「仓库里没有答案」。",
                     AnsweredBy.LLM, retrievedFrom, hits.size(), selected.size(), 0, 0,
-                    elapsedMillis(start), VerificationSummary.none());
+                    elapsedMillis(startNanos), VerificationSummary.none());
         }
         ModelJson.SingleHopAnswer parsed;
         try {
@@ -170,7 +213,7 @@ public class AnswerService {
             return new AskAnswer(null, List.of(), true,
                     "模型输出不是合法 JSON，本次未能给出带证据的答案：" + e.getMessage(),
                     AnsweredBy.LLM, retrievedFrom, hits.size(), selected.size(),
-                    completion.promptTokens(), completion.completionTokens(), elapsedMillis(start),
+                    completion.promptTokens(), completion.completionTokens(), elapsedMillis(startNanos),
                     VerificationSummary.none());
         }
 
@@ -179,7 +222,7 @@ public class AnswerService {
                     parsed.refusalReason() == null || parsed.refusalReason().isBlank()
                             ? "模型判断给定片段不足以回答" : parsed.refusalReason(),
                     AnsweredBy.LLM, retrievedFrom, hits.size(), selected.size(),
-                    completion.promptTokens(), completion.completionTokens(), elapsedMillis(start),
+                    completion.promptTokens(), completion.completionTokens(), elapsedMillis(startNanos),
                     VerificationSummary.none());
         }
 
@@ -218,7 +261,7 @@ public class AnswerService {
             return new AskAnswer(null, List.of(), true,
                     "模型的证据全部未通过核验（文件、行号或片段与磁盘对不上），按设计不予返回",
                     AnsweredBy.LLM, retrievedFrom, hits.size(), selected.size(),
-                    completion.promptTokens(), completion.completionTokens(), elapsedMillis(start),
+                    completion.promptTokens(), completion.completionTokens(), elapsedMillis(startNanos),
                     VerificationSummary.of(0, firstPass.failed(), repairs, "证据没过 ② 层，轮不到 ③ 层"));
         }
         if (evidence.isEmpty()) {
@@ -227,7 +270,7 @@ public class AnswerService {
             return new AskAnswer(null, List.of(), true,
                     "模型给出了结论但没有提供可用的 file+line 证据，按设计不予返回",
                     AnsweredBy.LLM, retrievedFrom, hits.size(), selected.size(),
-                    completion.promptTokens(), completion.completionTokens(), elapsedMillis(start),
+                    completion.promptTokens(), completion.completionTokens(), elapsedMillis(startNanos),
                     VerificationSummary.none());
         }
 
@@ -238,14 +281,14 @@ public class AnswerService {
             return new AskAnswer(null, accepted, true,
                     "证据通过了磁盘核验，但未通过 ③ 层判定（证据不支持结论）：" + support.reason(),
                     AnsweredBy.LLM, retrievedFrom, hits.size(), selected.size(),
-                    completion.promptTokens(), completion.completionTokens(), elapsedMillis(start),
+                    completion.promptTokens(), completion.completionTokens(), elapsedMillis(startNanos),
                     VerificationSummary.of(accepted.size(), firstPass.failed(), repairs, "判成不支持并拒答")
                             .withSupport(support));
         }
 
         return new AskAnswer(parsed.answer(), accepted, false, null, AnsweredBy.LLM,
                 retrievedFrom, hits.size(), selected.size(),
-                completion.promptTokens(), completion.completionTokens(), elapsedMillis(start),
+                completion.promptTokens(), completion.completionTokens(), elapsedMillis(startNanos),
                 new VerificationSummary(accepted.size(), firstPass.failed(), repairs, support));
     }
 

@@ -1,6 +1,8 @@
 package com.readcodeai.agent;
 
 import com.readcodeai.agent.cache.AnswerCache;
+import com.readcodeai.agent.log.AnswerLogService;
+import com.readcodeai.agent.log.AnswerLogSource;
 import com.readcodeai.agent.model.AgentAnswer;
 import com.readcodeai.agent.model.AgentMode;
 import com.readcodeai.agent.model.AnsweredBy;
@@ -54,10 +56,12 @@ public class AgentService {
     private final LlmClient llmClient;
     private final AnswerCache answerCache;
     private final ReadCodeAiProperties properties;
+    private final AnswerLogService answerLogService;
 
     public AgentService(AnswerService answerService, AgentLoop agentLoop, QueryRouter queryRouter,
                         SymbolQueryService symbolQueryService, LlmClient llmClient,
-                        AnswerCache answerCache, ReadCodeAiProperties properties) {
+                        AnswerCache answerCache, ReadCodeAiProperties properties,
+                        AnswerLogService answerLogService) {
         this.answerService = answerService;
         this.agentLoop = agentLoop;
         this.queryRouter = queryRouter;
@@ -65,6 +69,7 @@ public class AgentService {
         this.llmClient = llmClient;
         this.answerCache = answerCache;
         this.properties = properties;
+        this.answerLogService = answerLogService;
     }
 
     public AgentAnswer ask(Long repoId, String question, AgentMode mode, String scopePath, Integer topK) {
@@ -89,6 +94,10 @@ public class AgentService {
             AgentAnswer cached = readCache(effectiveRepoId, indexedAt, question, effectiveMode);
             if (cached != null) {
                 log.info("答案缓存命中：省下一次生成（当初花了 {} token）", cached.generationTokens());
+                // 缓存命中同样要记账：**这次确实被问了**，只是没有重新生成 ——
+                // cache_hit 列说明"token 记的是这份答案当初花的、这次省下了"
+                answerLogService.recordAgent(effectiveRepoId, AnswerLogSource.USER, question,
+                        cached.mode().name(), AnswerLogService.routeJson(routed), true, cached);
                 return cached;
             }
         }
@@ -114,7 +123,11 @@ public class AgentService {
         AgentAnswer answer = agentLoop.run(effectiveRepoId, repoRoot, question, seedObservations(routed),
                 BudgetGuard.of(properties));
         putIfCacheable(effectiveRepoId, repo, question, effectiveMode, answer);
+        answerLogService.recordAgent(effectiveRepoId, AnswerLogSource.USER, question, "MULTI_HOP",
+                AnswerLogService.routeJson(routed), false, answer);
         return answer;
+        // 注：转发单跳的那条路**不在这里记账** —— AnswerService 的出口已经记了一次，
+        // 这里再记一次会让同一个问题在流水里出现两行（记账点必须与"一次问答"一一对应）
         // 注：种子把目标符号的定义行一并交给模型（seedObservations 里同时返回位置），
         // 因此"引用目标自身的定义"是有据可依的，不会被"引用必须落在轨迹里"这条规则误杀。
     }

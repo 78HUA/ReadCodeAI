@@ -51,8 +51,8 @@ public class RedisAnswerCache implements AnswerCache {
     }
 
     @Override
-    public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode) {
-        String key = key(repoId, indexedAt, question, mode);
+    public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode, String model) {
+        String key = key(repoId, indexedAt, question, mode, model);
         try {
             String json = redis.opsForValue().get(key);
             if (json == null) {
@@ -68,9 +68,10 @@ public class RedisAnswerCache implements AnswerCache {
     }
 
     @Override
-    public void put(long repoId, String indexedAt, String question, String mode, AgentAnswer answer) {
+    public void put(long repoId, String indexedAt, String question, String mode, String model,
+                    AgentAnswer answer) {
         try {
-            redis.opsForValue().set(key(repoId, indexedAt, question, mode),
+            redis.opsForValue().set(key(repoId, indexedAt, question, mode, model),
                     mapper.writeValueAsString(answer), ttl);
         } catch (RuntimeException e) {
             warnOnce("写缓存失败（不影响本次回答）", e);
@@ -83,13 +84,17 @@ public class RedisAnswerCache implements AnswerCache {
     }
 
     /**
-     * 缓存键 = 前缀 + 仓库 + **索引版本** + 问题（含模式）的摘要。
+     * 缓存键 = 前缀 + 仓库 + **索引版本** + 问题（含模式与**模型名**）的摘要。
      *
      * <p>问题部分取 SHA-256：问题可能很长（几百字），而 Redis 的键越短越好；
      * 同一个问题只要有一个字符不同就算不同问题，这正是我们要的。
+     *
+     * <p><b>模型名也进键</b>：换模型或换供应商之后，旧答案不该再被返回 ——
+     * 摘要缓存与向量早就按模型隔离了，答案缓存这一处是补上的漏洞（换 key/模型时才发现）。
      */
-    public static String key(long repoId, String indexedAt, String question, String mode) {
-        return KEY_PREFIX + repoId + ":" + (indexedAt == null ? "-" : indexedAt) + ":" + sha256(mode + "\n" + question);
+    public static String key(long repoId, String indexedAt, String question, String mode, String model) {
+        return KEY_PREFIX + repoId + ":" + (indexedAt == null ? "-" : indexedAt) + ":"
+                + sha256(model + "\n" + mode + "\n" + question);
     }
 
     private static String sha256(String text) {

@@ -123,6 +123,19 @@ class TextSearchTest {
     }
 
     @Test
+    void relaxedSearchOnlyUsesIdentifiersWhenThereAreAny() {
+        // 放宽检索（任一词命中）时，有标识符就只用标识符：
+        // 中文二元组在注释里到处都是，OR 进去既拉噪声、又可能把 MySQL 的全文检索结果缓存撑爆（实测 error 188）
+        assertThat(TextRetriever.relaxedTokens(java.util.List.of("deleteAddressBook", "方法", "调用")))
+                .as("有标识符时只用标识符").containsExactly("deleteAddressBook");
+        assertThat(TextRetriever.relaxedTokens(java.util.List.of("方法", "调用")))
+                .as("没有标识符（纯中文问句）才退到全部词 —— 否则中文问题一条都搜不到")
+                .containsExactly("方法", "调用");
+        System.out.printf("%n[检索] 放宽时优先标识符：%s%n",
+                TextRetriever.relaxedTokens(java.util.List.of("AddressBookService", "方法")));
+    }
+
+    @Test
     void returnsEmptyForSomethingThatIsNotThereInsteadOfInventingHits() {
         RepoView repo = corpus();
         assertThat(textRetriever.search(repo.id(), "zzzNotPresentIdentifierXyz", 10)).isEmpty();

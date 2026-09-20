@@ -161,14 +161,18 @@ class AgentAnswerCacheTest {
     @Test
     void theCacheKeyCarriesTheIndexVersionSoAnswersNeverGoStale() {
         String question = "谁调用了它";
-        String v1 = RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "MULTI_HOP");
-        String v2 = RedisAnswerCache.key(7L, "2026-09-19T11:00:00", question, "MULTI_HOP");
+        String model = "glm-4-flash";
+        String v1 = RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "MULTI_HOP", model);
+        String v2 = RedisAnswerCache.key(7L, "2026-09-19T11:00:00", question, "MULTI_HOP", model);
 
         assertThat(v1).isNotEqualTo(v2).as("索引版本变了，键就必须变 —— 否则会拿到上一版代码的答案");
-        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "MULTI_HOP")).isEqualTo(v1);
-        assertThat(RedisAnswerCache.key(8L, "2026-09-19T10:00:00", question, "MULTI_HOP")).isNotEqualTo(v1);
-        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "SINGLE_HOP")).isNotEqualTo(v1);
-        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question + "？", "MULTI_HOP")).isNotEqualTo(v1);
+        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "MULTI_HOP", model)).isEqualTo(v1);
+        assertThat(RedisAnswerCache.key(8L, "2026-09-19T10:00:00", question, "MULTI_HOP", model)).isNotEqualTo(v1);
+        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "SINGLE_HOP", model)).isNotEqualTo(v1);
+        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question + "？", "MULTI_HOP", model)).isNotEqualTo(v1);
+        // 换模型（或换供应商）之后，同一个问题必须重新生成：旧答案是上一个模型给的
+        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "MULTI_HOP", "deepseek-chat"))
+                .as("模型名必须进键 —— 否则换模型后还会拿到旧模型的答案").isNotEqualTo(v1);
         assertThat(v1).startsWith("readcodeai:answer:").as("键前缀要能一眼看出是谁写的");
     }
 
@@ -182,13 +186,15 @@ class AgentAnswerCacheTest {
         private int puts;
 
         @Override
-        public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode) {
+        public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode,
+                                         String model) {
             gets++;
             return Optional.ofNullable(store.get(key(repoId, indexedAt, question, mode)));
         }
 
         @Override
-        public void put(long repoId, String indexedAt, String question, String mode, AgentAnswer answer) {
+        public void put(long repoId, String indexedAt, String question, String mode, String model,
+                        AgentAnswer answer) {
             puts++;
             store.put(key(repoId, indexedAt, question, mode), answer);
         }
@@ -207,12 +213,14 @@ class AgentAnswerCacheTest {
     private static final class ExplodingCache implements AnswerCache {
 
         @Override
-        public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode) {
+        public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode,
+                                         String model) {
             throw new IllegalStateException("Redis 挂了");
         }
 
         @Override
-        public void put(long repoId, String indexedAt, String question, String mode, AgentAnswer answer) {
+        public void put(long repoId, String indexedAt, String question, String mode, String model,
+                        AgentAnswer answer) {
             throw new IllegalStateException("Redis 挂了");
         }
 

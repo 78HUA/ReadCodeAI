@@ -7,6 +7,7 @@ import com.readcodeai.index.model.IndexJob;
 import com.readcodeai.index.queue.RabbitIndexTaskQueue;
 import com.readcodeai.index.store.IndexJobRepository;
 import com.readcodeai.retrieve.SymbolQueryService;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.AmqpAdmin;
@@ -43,7 +44,11 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  */
 @SpringBootTest(properties = {
         "readcodeai.queue.mode=RABBIT",
-        "readcodeai.index.workspace=target/test-workspace-rabbit"
+        "readcodeai.index.workspace=target/test-workspace-rabbit",
+        // **用自己的队列名**：否则会跟"正在运行的应用实例"抢同一个队列 ——
+        // 实测踩过：应用也在消费，测试暂停自己的消费者没用，消息被应用取走，断言看到 DONE 而不是 QUEUED
+        "readcodeai.queue.name=readcodeai.index.jobs.test",
+        "readcodeai.queue.dlq-name=readcodeai.index.jobs.test.dlq"
 })
 class RabbitIndexLiveTest {
 
@@ -80,6 +85,15 @@ class RabbitIndexLiveTest {
     private RabbitIndexTaskQueue rabbit() {
         assumeTrue(queue instanceof RabbitIndexTaskQueue, "当前不是 rabbit 模式的队列，跳过");
         return (RabbitIndexTaskQueue) queue;
+    }
+
+    @AfterEach
+    void deleteReposThisTestCreated() {
+        // 断言失败时测试自己那行 deleteIndex 走不到 —— 这里按临时目录前缀兜底，界面才不会被测试垃圾污染
+        int deleted = TestRepoCleanup.deleteReposUnder(jdbc, tempDir.toString().replace(java.io.File.separatorChar, '/') + "%");
+        if (deleted > 0) {
+            System.out.printf("[MQ·清理] 删掉本次测试造的 %d 个仓库行%n", deleted);
+        }
     }
 
     @BeforeEach

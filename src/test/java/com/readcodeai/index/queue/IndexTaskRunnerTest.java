@@ -7,6 +7,7 @@ import com.readcodeai.index.model.IndexJob;
 import com.readcodeai.index.store.IndexJobRepository;
 import com.readcodeai.retrieve.SymbolQueryService;
 import com.readcodeai.retrieve.model.RepoView;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -59,6 +60,15 @@ class IndexTaskRunnerTest {
 
     @Autowired
     private JdbcTemplate jdbc;
+
+    @AfterEach
+    void deleteReposThisTestCreated() {
+        int deleted = com.readcodeai.verify.TestRepoCleanup.deleteReposUnder(jdbc,
+                tempDir.toString().replace(java.io.File.separatorChar, '/') + "%", "%test-workspace-queue%");
+        if (deleted > 0) {
+            System.out.printf("[队列·清理] 删掉本次测试造的 %d 个仓库行%n", deleted);
+        }
+    }
 
     @Test
     void runningTheSameTaskTwiceIndexesOnlyOnce() throws IOException, InterruptedException {

@@ -133,15 +133,45 @@ public class RabbitIndexTaskQueue implements IndexTaskQueue {
         return dlqName;
     }
 
-    /** 暂停/恢复消费：重启续跑的实验靠它模拟"消费者不在"，运维时也能用来让 worker 停下来。 */
+    /**
+     * 暂停/恢复消费：重启续跑的实验靠它模拟"消费者不在"，运维时也能用来让 worker 停下来。
+     *
+     * <p><b>必须等它真的停/真的起</b>：{@code stop()} 是异步收尾的，若立刻返回，
+     * 紧接着发布的消息可能被尚未退出的消费者取走 —— 实测（测试间竞态）就是这样：
+     * "消费者不在"的前提下任务却被消费了，断言看到 stage=DONE 而不是 QUEUED。
+     */
     public void pauseConsuming() {
         container.stop();
+        // 等到**活跃消费者数为 0**，而不是等 isRunning()==false：
+        // stop() 一开始就把 isRunning 置为 false，但消费者线程还在退出窗口里（通道尚未关闭），
+        // 那个窗口里发布的消息仍可能被取走 —— 实测抓到的竞态就是这么来的
+        awaitConsumers(0, "暂停");
         log.info("已暂停消费（队列 {} 里的消息会留着）", queueName);
     }
 
     public void resumeConsuming() {
         container.start();
+        awaitConsumers(1, "恢复");
         log.info("已恢复消费（队列 {}）", queueName);
+    }
+
+    private void awaitConsumers(int expectedAtLeast, String action) {
+        long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
+        while (System.nanoTime() < deadline && container.getActiveConsumerCount() < expectedAtLeast) {
+            sleep50();
+        }
+        if (container.getActiveConsumerCount() < expectedAtLeast) {
+            log.warn("等待消费者{}超时：活跃消费者 {}（期望至少 {}）", action,
+                    container.getActiveConsumerCount(), expectedAtLeast);
+        }
+    }
+
+    private static void sleep50() {
+        try {
+            Thread.sleep(50);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**

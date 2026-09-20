@@ -31,10 +31,14 @@ public interface AnswerCache {
      * （{@code AgentAnswer.asCached()}）。这条约定放在接口上，是为了不让每个实现都得记得做对：
      * 漏一个就会出现"缓存明明命中了、界面却不显示"的怪事（写测试时正好踩到）。
      */
-    Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode);
+    /**
+     * @param model 生成答案用的模型名。**它必须进键**：换模型（或换供应商）之后，
+     *              同一个问题的答案应当重新生成 —— 否则会返回上一个模型的答案（实测中发现的坑）
+     */
+    Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode, String model);
 
     /** 存缓存；失败只记日志，不抛。 */
-    void put(long repoId, String indexedAt, String question, String mode, AgentAnswer answer);
+    void put(long repoId, String indexedAt, String question, String mode, String model, AgentAnswer answer);
 
     /** 缓存是否真的在工作（界面与日志用得上）。 */
     String describe();

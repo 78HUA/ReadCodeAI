@@ -2,6 +2,8 @@ package com.readcodeai.retrieve;
 
 import com.readcodeai.index.store.TextSearchRepository;
 import com.readcodeai.retrieve.model.ChunkHit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -20,6 +22,12 @@ import java.util.List;
  */
 @Service
 public class TextRetriever {
+
+    private static final Logger log = LoggerFactory.getLogger(TextRetriever.class);
+
+    /** 检索故障只大声记一次（缓存故障那样刷屏只会淹没真正的错误）。 */
+    private final java.util.concurrent.atomic.AtomicBoolean retrievalFailureLogged =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     /** 太短的词（单字符、单个汉字之外）检索价值低，反而会拉进大量噪声。 */
     private static final int MIN_TOKEN_LENGTH = 2;
@@ -49,10 +57,44 @@ public class TextRetriever {
 
         // 先精确后放宽：短查询（如一个标识符）用「全部词都必须命中」，
         // 拿不到结果再放宽成「任一词命中」—— 自然语言长句走的是后一条路。
-        List<ChunkHit> precise = repository.searchPhrases(effectiveRepoId, tokens, true, capped);
-        return precise.isEmpty()
-                ? repository.searchPhrases(effectiveRepoId, tokens, false, capped)
-                : precise;
+        // 放宽**只放宽到标识符**（有 ASCII token 时不用中文虚词二元组去 OR）：二元组在中文注释里到处都是，
+        // OR 进去既拉噪声、又可能把 MySQL 的全文检索结果缓存撑爆（实测撞到过 error 188）。
+        try {
+            List<ChunkHit> precise = repository.searchPhrases(effectiveRepoId, tokens, true, capped);
+            return precise.isEmpty()
+                    ? repository.searchPhrases(effectiveRepoId, relaxedTokens(tokens), false, capped)
+                    : precise;
+        } catch (org.springframework.dao.DataAccessException e) {
+            // **检索失败要降级成"没查到"，不能升级成"这次请求失败"** —— 与 LLM/缓存同一套纪律。
+            // 实测触发过：加了文本文件之后索引变大，某个中文问句的多短语布尔查询
+            // 触发了 MySQL 的 "FTS query exceeds result cache limit"（error 188）。
+            // 那种情况下"答不了"是可接受的结果，"500"不是。
+            warnOnce(e);
+            return List.of();
+        }
+    }
+
+    /**
+     * 放宽检索时用的词：**有标识符就只用标识符**，没有才退到全部词。
+     *
+     * <p>为什么：ASCII 标识符是精确 token（{@code deleteAddressBook} 命中面很窄），
+     * 而中文二元组（"方法"、"是在"）在注释里到处都是 —— 拿它们做 OR 等于把整个仓库捞一遍。
+     */
+    static List<String> relaxedTokens(List<String> tokens) {
+        List<String> identifiers = tokens.stream().filter(TextRetriever::hasAsciiLetter).toList();
+        return identifiers.isEmpty() ? tokens : identifiers;
+    }
+
+    private static boolean hasAsciiLetter(String token) {
+        return token.chars().anyMatch(c -> c < 128 && Character.isLetter(c));
+    }
+
+    private void warnOnce(org.springframework.dao.DataAccessException e) {
+        if (retrievalFailureLogged.compareAndSet(false, true)) {
+            log.warn("全文检索失败，按「没有检索到片段」处理（后续同类错误不再重复记录）：{}", e.getMessage());
+        } else {
+            log.debug("全文检索失败：{}", e.getMessage());
+        }
     }
 
     /**

@@ -8,12 +8,14 @@ import ReposView from './views/ReposView.vue'
 import SummaryView from './views/SummaryView.vue'
 import AskView from './views/AskView.vue'
 import MetricsView from './views/MetricsView.vue'
+import StatusView from './views/StatusView.vue'
 
 const tabs = [
   { key: 'repos', label: '① 仓库' },
   { key: 'summary', label: '② 概览' },
   { key: 'ask', label: '③ 追问' },
-  { key: 'metrics', label: '④ 指标' }
+  { key: 'metrics', label: '④ 指标' },
+  { key: 'status', label: '⑤ 运行状态' }
 ]
 
 const view = ref('repos')
@@ -87,6 +89,8 @@ onMounted(loadRepos)
     <SummaryView v-else-if="view === 'summary' && currentRepoId" :repo-id="currentRepoId" />
     <AskView v-else-if="view === 'ask' && currentRepoId" :repo-id="currentRepoId" />
     <MetricsView v-else-if="view === 'metrics' && currentRepoId" :repo-id="currentRepoId" />
+    <!-- 状态页不依赖"选中仓库"：它报的是服务本身的配置与降级情况，没索引仓库时也该能看 -->
+    <StatusView v-else-if="view === 'status'" />
     <div v-else class="panel muted">还没有索引任何仓库 —— 先在上面「① 仓库」里添加一个。</div>
   </div>
 </template>

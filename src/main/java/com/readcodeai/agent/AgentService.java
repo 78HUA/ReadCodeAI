@@ -132,7 +132,7 @@ public class AgentService {
         }
         String indexedAt = repo.indexedAt() == null ? null : repo.indexedAt().toString();
         try {
-            answerCache.put(repoId, indexedAt, question, mode.name(), answer);
+            answerCache.put(repoId, indexedAt, question, mode.name(), llmClient.model(), answer);
         } catch (RuntimeException e) {
             // 缓存写失败只该表现为"下次还得重算"，绝不能影响这次回答
             log.warn("写答案缓存失败（不影响本次回答）：{}", e.toString());
@@ -148,7 +148,7 @@ public class AgentService {
     private AgentAnswer readCache(long repoId, String indexedAt, String question, AgentMode mode) {
         try {
             // 命中就统一标成"来自缓存"（缓存实现只管存取，不负责这件事）
-            return answerCache.get(repoId, indexedAt, question, mode.name())
+            return answerCache.get(repoId, indexedAt, question, mode.name(), llmClient.model())
                     .map(AgentAnswer::asCached)
                     .orElse(null);
         } catch (RuntimeException e) {

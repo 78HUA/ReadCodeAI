@@ -165,6 +165,7 @@ npm run build          # 产物直接写进 src/main/resources/static/
 | `index.workspace` | `~/.readcodeai/repos` | 远程拉取与上传解压的存放目录 |
 | `index.max-file-size-kb` | 2048 | 单文件超过就跳过并记录 |
 | `index.parse-threads` | 0 | 解析并行度：`0` = 自动（核数与 8 取小），`1` = 串行（对照组/逃生门） |
+| `index.optimize-fulltext-threshold` | 200 | 索引收尾时重建全文索引的阈值（检索单元数）。**重复索引会留碎片**：实测把检索从 65 ms 拖到 13 秒，重建一次几百毫秒；`0` = 关闭 |
 | `queue.mode` | `in-process` | 索引任务投递：`in-process`（零依赖，重启丢任务）/ `rabbit`（持久化、重启续跑、可扩消费者） |
 | `queue.concurrency` | 1 | 同时跑几个索引（MQ 模式）。实测三个仓库 1→38s、3→24s；调大前请确认锁可用 |
 | `queue.name` / `dlq-name` | `readcodeai.index.jobs(.dlq)` | 主队列与死信队列（消费失败进 DLQ，不无限重投） |
@@ -246,6 +247,9 @@ mvn test -Dreadcodeai.verify.repo=/path/to/a/java/repo
 - 答案缓存（Redis）：同一个问题第二次 **52.9 秒 → 0.113 秒**（约 468 倍），且一个 token 不花；
   杀掉 Redis 后问答照常（只是每次真算）
 - 代码审查的实测：规则稳定可用、模型意见多数不可用，以及"证据全对、结论全错"的具体例子
+- **全文检索碎片**：一天里反复重索引之后，同一个检索从 **65 ms 退化到 13,355 ms**（200 倍）——
+  根因是 InnoDB 的 ngram 索引碎片累积（3007 个 chunk 对应 6170 万条索引项）。
+  索引收尾按阈值自动重建（gson 规模 2.6 秒），实测 `AgentAnswerCacheTest` 从 299 秒回到 6 秒
 - **索引性能（先测后改）**：gson 索引 17.4s → **5.1s** —— 瓶颈其实在落库（占 70%），根因是
   「逐行插入 + 每行一次自动提交」；批量化 + `rewriteBatchedStatements` 把落库从 12.1s 压到 0.8s。
   再按文件**并行解析**（结果按原序归并，串行/并行的结构指纹逐条一致）：十万行档解析提速 **4.84x**、

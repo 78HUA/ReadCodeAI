@@ -57,11 +57,12 @@ public class AgentService {
     private final AnswerCache answerCache;
     private final ReadCodeAiProperties properties;
     private final AnswerLogService answerLogService;
+    private final SummaryAnswerer summaryAnswerer;
 
     public AgentService(AnswerService answerService, AgentLoop agentLoop, QueryRouter queryRouter,
                         SymbolQueryService symbolQueryService, LlmClient llmClient,
                         AnswerCache answerCache, ReadCodeAiProperties properties,
-                        AnswerLogService answerLogService) {
+                        AnswerLogService answerLogService, SummaryAnswerer summaryAnswerer) {
         this.answerService = answerService;
         this.agentLoop = agentLoop;
         this.queryRouter = queryRouter;
@@ -70,9 +71,20 @@ public class AgentService {
         this.answerCache = answerCache;
         this.properties = properties;
         this.answerLogService = answerLogService;
+        this.summaryAnswerer = summaryAnswerer;
     }
 
     public AgentAnswer ask(Long repoId, String question, AgentMode mode, String scopePath, Integer topK) {
+        return ask(repoId, question, mode, scopePath, topK, false);
+    }
+
+    /**
+     * @param deep 深链模式（追问页勾选）：把多跳的轮次/时长/token 额度换大（见 {@link BudgetGuard#deepOf}），
+     *             用来追长链。它只影响多跳那条路 —— 静态与单跳本来就是几毫秒到几十秒。
+     *             <p><b>额度由配置给，不由前端传数字</b>：预算是闸门，前端只能选"要不要深链"。
+     */
+    public AgentAnswer ask(Long repoId, String question, AgentMode mode, String scopePath, Integer topK,
+                           boolean deep) {
         if (question == null || question.isBlank()) {
             throw new IllegalArgumentException("问题不能为空");
         }
@@ -83,6 +95,17 @@ public class AgentService {
 
         QueryRouter.Routed routed = queryRouter.route(effectiveRepoId, question,
                 SymbolLookups.of(symbolQueryService, effectiveRepoId));
+
+        // 总结类问题**不走检索**：答案不是藏在某几段代码里，而是"结构算出来 + 语义模型补"。
+        // 走多跳的代价实测过：93 秒、6 轮、16.5k token，最后模型 JSON 还写坏了、按拒答返回。
+        if (SummaryIntent.isSummaryQuestion(question)) {
+            log.info("问题命中总结意图 → 结构化摘要（用户选的模式 {} 对它没有影响）", effectiveMode);
+            AgentAnswer answer = summaryAnswerer.answer(effectiveRepoId, repoRoot, question,
+                    AgentMode.SUMMARY);
+            answerLogService.recordAgent(effectiveRepoId, AnswerLogSource.USER, question, "SUMMARY",
+                    AnswerLogService.routeJson(routed, deep), false, answer);
+            return answer;
+        }
 
         boolean wantsMultiHop = effectiveMode == AgentMode.MULTI_HOP
                 && (!routed.isDeterministic() || ChainIntent.isChainQuestion(question));
@@ -121,10 +144,10 @@ public class AgentService {
         }
         // scopePath / topK 是多跳里用不上的旋钮：检索范围由模型自己决定，手动限定反而会把它框死
         AgentAnswer answer = agentLoop.run(effectiveRepoId, repoRoot, question, seedObservations(routed),
-                BudgetGuard.of(properties));
+                deep ? BudgetGuard.deepOf(properties) : BudgetGuard.of(properties));
         putIfCacheable(effectiveRepoId, repo, question, effectiveMode, answer);
         answerLogService.recordAgent(effectiveRepoId, AnswerLogSource.USER, question, "MULTI_HOP",
-                AnswerLogService.routeJson(routed), false, answer);
+                AnswerLogService.routeJson(routed, deep), false, answer);
         return answer;
         // 注：转发单跳的那条路**不在这里记账** —— AnswerService 的出口已经记了一次，
         // 这里再记一次会让同一个问题在流水里出现两行（记账点必须与"一次问答"一一对应）

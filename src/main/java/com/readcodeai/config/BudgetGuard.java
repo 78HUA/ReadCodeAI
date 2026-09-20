@@ -80,6 +80,21 @@ public class BudgetGuard {
     }
 
     /**
+     * 深链模式：**同一套记账，只把额度换大** —— 成本上限沿用主预算（它是使用者真正在意的红线，
+     * 不随模式放宽；轮次/时长/token 是可以安全放大的资源额度）。
+     *
+     * <p>实测依据：第三组对比实验里 **2/3 的题是"轮次用尽"停的**，而轨迹里已经有 60% / 100% 的命中 ——
+     * 那些链不是答不了，是没查完。
+     */
+    public static BudgetGuard deepOf(ReadCodeAiProperties properties) {
+        ReadCodeAiProperties.Llm llm = properties.getLlm();
+        ReadCodeAiProperties.Llm.Deep deep = llm.getDeep();
+        return new BudgetGuard(deep.getMaxRounds(), deep.getMaxDurationMs(),
+                deep.getMaxEstimatedTokens(), llm.getMaxEstimatedCost(),
+                llm.getInputPricePerMillion(), llm.getOutputPricePerMillion());
+    }
+
+    /**
      * 还能不能再走一轮。**任一维度超限即停，并记下是哪一个** ——
      * 报告"为什么停"必须说得出具体维度，否则「预算终止」就成了含糊的说辞。
      */

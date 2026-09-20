@@ -80,6 +80,9 @@ class AgentAnswerCacheTest {
     @Autowired
     private ReadCodeAiProperties properties;
 
+    @Autowired
+    private SummaryAnswerer summaryAnswerer;
+
     @Test
     void secondIdenticalQuestionComesFromCacheWithoutCallingTheModelAgain() {
         RepoView repo = corpus();
@@ -236,7 +239,7 @@ class AgentAnswerCacheTest {
                 com.readcodeai.verify.TestAnswerLogs.silent(properties));
         return new AgentService(singleHop, new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, client, 2),
                 queryRouter, queries, client, cache, properties,
-                com.readcodeai.verify.TestAnswerLogs.silent(properties));
+                com.readcodeai.verify.TestAnswerLogs.silent(properties), summaryAnswerer);
     }
 
     private SymbolView firstWithCallers(long repoId) {

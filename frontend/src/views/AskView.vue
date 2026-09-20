@@ -14,6 +14,8 @@ const props = defineProps({ repoId: Number })
 
 const question = ref('')
 const mode = ref('multi')
+// 深链模式：只影响多跳那条路（额度由服务端配置给，这里只选要不要）
+const deep = ref(false)
 const busy = ref(false)
 const error = ref('')
 const thread = ref([])
@@ -21,6 +23,7 @@ const drawer = ref(null)
 const bottom = ref(null)
 
 const samples = [
+  '这个项目是干什么的？',
   '谁调用了 deleteAddressBook 方法？',
   '沿调用链向上追：有哪些方法（直接或间接）最终会调用 fromJson？',
   '上传文件的接口在哪个类里？'
@@ -31,14 +34,14 @@ async function ask() {
   if (!text) return
   busy.value = true
   error.value = ''
-  const entry = { question: text, mode: mode.value, answer: null, error: null, at: new Date() }
+  const entry = { question: text, mode: mode.value, deep: deep.value, answer: null, error: null, at: new Date() }
   thread.value.push(entry)
   question.value = ''
   await nextTick()
   bottom.value?.scrollIntoView({ behavior: 'smooth' })
   try {
     entry.answer = mode.value === 'multi'
-      ? await api.ask(props.repoId, text, 'multi')
+      ? await api.ask(props.repoId, text, 'multi', deep.value)
       : await api.askSingleHop(props.repoId, text)
   } catch (e) {
     entry.error = e.message
@@ -47,6 +50,16 @@ async function ask() {
     await nextTick()
     bottom.value?.scrollIntoView({ behavior: 'smooth' })
   }
+}
+
+// 徽章**以响应里的 mode 为准**，不是用户选的那个 —— 选中"多跳"但问题被判定成总结类时，
+// 界面上必须显示"摘要"，否则使用者会以为它偷偷走了别的路（它确实走了）
+function modeBadge(entry) {
+  const actual = entry.answer && entry.answer.mode
+  if (actual === 'SUMMARY') return { text: '摘要', cls: 'ok' }
+  if (actual === 'SINGLE_HOP') return { text: '单跳', cls: 'plain' }
+  if (actual === 'MULTI_HOP') return { text: '多跳', cls: 'info' }
+  return entry.mode === 'multi' ? { text: '多跳', cls: 'info' } : { text: '单跳', cls: 'plain' }
 }
 
 function openEvidence(evidence) {
@@ -94,8 +107,13 @@ function isRefusal(entry) {
         <button :class="{ active: mode === 'single' }" @click="mode = 'single'">单跳（对照）</button>
       </div>
       <span class="small muted">
-        {{ mode === 'multi' ? '模型自主决定跳向；确定性问题仍然不走模型' : '一次检索 + 模型组织答案；链式问题只能答一层' }}
+        {{ mode === 'multi' ? '模型自主决定跳向；确定性问题与总结类问题仍然不走多跳' : '一次检索 + 模型组织答案；链式问题只能答一层' }}
       </span>
+      <label v-if="mode === 'multi'" class="small muted"
+             style="display: flex; align-items: center; gap: 5px; cursor: pointer">
+        <input type="checkbox" v-model="deep" style="width: auto; margin: 0" />
+        深链模式（最多 14 轮，追更长的调用链；更慢）
+      </label>
     </div>
 
     <textarea v-model="question" rows="2" placeholder="例如：这个参数是从哪传进来的？"
@@ -118,9 +136,8 @@ function isRefusal(entry) {
 
   <div v-for="(entry, index) in thread" :key="index" class="panel qa">
     <div class="q">Q{{ thread.length - index }}. {{ entry.question }}
-      <span class="badge" :class="entry.mode === 'multi' ? 'info' : 'plain'">
-        {{ entry.mode === 'multi' ? '多跳' : '单跳' }}
-      </span>
+      <span class="badge" :class="modeBadge(entry).cls">{{ modeBadge(entry).text }}</span>
+      <span v-if="entry.deep && entry.answer && entry.answer.mode === 'MULTI_HOP'" class="badge warn">深链</span>
     </div>
 
     <div v-if="entry.error" class="error">{{ entry.error }}</div>
@@ -133,6 +150,16 @@ function isRefusal(entry) {
       <div v-else class="answer">
         <p style="margin: 0 0 6px; white-space: pre-wrap">{{ entry.answer.answer }}</p>
       </div>
+
+      <p v-if="entry.answer.mode === 'SUMMARY'" class="notice info small">
+        这次<strong>没有走检索</strong>：总结类问题由「结构化摘要」直接作答 ——
+        规模、模块划分、入口与调用枢纽都由索引算出（下面的证据每条都能点开核对），
+        「它做什么 / 主要功能」由模型依据这些材料组织（它提到的符号已回索引核对）。
+      </p>
+      <p v-if="entry.answer.stopReason === 'BUDGET_ROUNDS'" class="notice info small">
+        轮次用尽就停下来了 —— 轨迹里查到的都交出来了，只是模型没来得及给结论。
+        想追更长的链，勾上上面的<strong>深链模式</strong>（最多 14 轮）再问一次。
+      </p>
 
       <!-- ③ 层核验：前两层只能证明"这几行真实存在"，证明不了"这几行说的就是结论说的那件事" -->
       <p v-if="support(entry).status === 'UNSUPPORTED'" class="notice">

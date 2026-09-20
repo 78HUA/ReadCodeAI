@@ -36,7 +36,9 @@ public enum StopReason {
     /** 确定性问题，静态分析直接算出 */
     STATIC("确定性问题，由静态分析直接算出"),
     /** 走了一圈但什么都没查到 */
-    NOTHING_FOUND("轨迹里没有查到任何相关符号");
+    NOTHING_FOUND("轨迹里没有查到任何相关符号"),
+    /** 总结类问题**没有走检索**，直接由结构化摘要作答（结构算出来、语义模型补） */
+    SUMMARY_ANSWERED("总结类问题，走结构化摘要作答");
 
     private final String label;
 

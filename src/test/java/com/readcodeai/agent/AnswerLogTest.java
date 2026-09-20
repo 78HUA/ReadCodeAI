@@ -101,6 +101,9 @@ class AnswerLogTest {
     @Autowired
     private ReadCodeAiProperties properties;
 
+    @Autowired
+    private SummaryAnswerer summaryAnswerer;
+
     @AfterEach
     void cleanUp() {
         TestRepoCleanup.deleteReposUnder(jdbc, TEMP_PATH_PREFIX + "%");
@@ -247,7 +250,7 @@ class AnswerLogTest {
     private AgentService agentServiceWith(LlmClient client, AnswerCache cache) {
         AgentLoop loop = new AgentLoop(toolRegistry, evidenceVerifier, TestCheckers.NONE, client, 2);
         return new AgentService(answerServiceWith(client), loop, queryRouter, queries, client, cache,
-                properties, answerLogService);
+                properties, answerLogService, summaryAnswerer);
     }
 
     private RepoView corpus() {

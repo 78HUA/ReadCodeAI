@@ -77,6 +77,9 @@ class AgentServiceTest {
     @Autowired
     private ReadCodeAiProperties properties;
 
+    @Autowired
+    private SummaryAnswerer summaryAnswerer;
+
     /** 一被调用就抛错 —— 用来证明"这条路上模型确实没被叫"（而不是"我们以为没叫"）。 */
     private static final ScriptedLlmClient.Script MUST_NOT_BE_CALLED = (turn, prompt) -> {
         throw new AssertionError("这条路线不该调用模型，却在第 " + turn + " 轮被调用了");
@@ -147,13 +150,45 @@ class AgentServiceTest {
                 new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, new NoopLlmClient("测试：未配置"), 2),
                 queryRouter, queries, new NoopLlmClient("测试：未配置"),
                 new com.readcodeai.agent.cache.NoopAnswerCache("测试"), properties,
-                com.readcodeai.verify.TestAnswerLogs.silent(properties));
+                com.readcodeai.verify.TestAnswerLogs.silent(properties), summaryAnswerer);
         RepoView repo = corpus();
 
         assertThatThrownBy(() -> service.ask(repo.id(), "这个参数是从哪来的？", AgentMode.MULTI_HOP, null, 8))
                 .isInstanceOf(LlmUnavailableException.class)
                 .hasMessageContaining("多跳检索不可用")
                 .hasMessageContaining("确定性能力不受影响");
+    }
+
+    /**
+     * 深链模式：**同一套记账，只把额度换大** —— 验收方式是"它真的多跑了几轮"。
+     *
+     * <p>量出来的依据：多跳实验里 2/3 的题是"轮次用尽"停的，而轨迹里已经有 60% / 100% 的命中 ——
+     * 那些链不是答不了，是没查完。
+     */
+    @Test
+    void deepModeRunsTheLargerBudgetOnlyWhenAsked() {
+        RepoView repo = corpus();
+        List<SymbolView> methods = repository.mostCalledMethods(repo.id(), 30);
+        assumeTrue(methods.size() >= 14, "语料里方法太少，跑不满两套预算");
+        String[] symbols = methods.stream().limit(14).map(SymbolView::qualifiedName).toArray(String[]::new);
+
+        // 脚本模型每轮去查一个**不同**的符号：永远不给结论，直到预算把它掐停。
+        // 换着符号查是为了不触发"重复调用"的环检测 —— 那会让它提前停，就量不到预算差异了
+        AgentService service = serviceWith(new ScriptedLlmClient((turn, prompt) ->
+                ScriptedLlmClient.callTool("findDefinition", "symbol", symbols[(turn - 1) % symbols.length])));
+
+        String question = "这个参数是从哪来的：" + symbols[0] + "？";
+        AgentAnswer normal = service.ask(repo.id(), question, AgentMode.MULTI_HOP, null, 8, false);
+        AgentAnswer deep = service.ask(repo.id(), question, AgentMode.MULTI_HOP, null, 8, true);
+
+        assertThat(normal.stopReason()).isEqualTo(StopReason.BUDGET_ROUNDS);
+        assertThat(deep.stopReason()).isEqualTo(StopReason.BUDGET_ROUNDS);
+        // 轮次算术：模型实际被调用 maxRounds-1 次 —— 最后那"1 轮"是留给**结论**的，
+        // 而模型在被判为最后一轮时还想着调工具，就直接停机（见 AgentLoop 与配置里的注释）
+        assertThat(normal.rounds()).isEqualTo(properties.getLlm().getMaxRounds() - 1);
+        assertThat(deep.rounds()).as("深链模式应当跑满 deep 那套额度")
+                .isEqualTo(properties.getLlm().getDeep().getMaxRounds() - 1);
+        assertThat(deep.rounds()).isGreaterThan(normal.rounds());
     }
 
     /**
@@ -168,7 +203,7 @@ class AgentServiceTest {
                 com.readcodeai.verify.TestAnswerLogs.silent(properties));
         return new AgentService(singleHop, new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, client, 2),
                 queryRouter, queries, client, new com.readcodeai.agent.cache.NoopAnswerCache("测试"),
-                properties, com.readcodeai.verify.TestAnswerLogs.silent(properties));
+                properties, com.readcodeai.verify.TestAnswerLogs.silent(properties), summaryAnswerer);
     }
 
     private SymbolView firstWithCallers(long repoId) {

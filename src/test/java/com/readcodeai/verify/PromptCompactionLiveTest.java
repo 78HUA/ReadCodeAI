@@ -3,6 +3,7 @@ package com.readcodeai.verify;
 import com.readcodeai.agent.AgentLoop;
 import com.readcodeai.agent.AgentService;
 import com.readcodeai.agent.AnswerService;
+import com.readcodeai.agent.SummaryAnswerer;
 import com.readcodeai.agent.ToolRegistry;
 import com.readcodeai.agent.cache.NoopAnswerCache;
 import com.readcodeai.config.LlmClient;
@@ -79,6 +80,9 @@ class PromptCompactionLiveTest {
     @Autowired
     private ReadCodeAiProperties properties;
 
+    @Autowired
+    private SummaryAnswerer summaryAnswerer;
+
     @Test
     void measuresTheTokenSavingAndTheQualityCostOfCompactingOldHops() {
         LiveLlm.assumeReachable(llmClient);
@@ -153,7 +157,7 @@ class PromptCompactionLiveTest {
                 keepFullObservations);
         return new AgentService(answerService, loop, queryRouter, queries, llmClient,
                 new NoopAnswerCache("A/B 实验必须禁用缓存：否则第二组会命中第一组的答案、token 变成 0"),
-                properties, TestAnswerLogs.silent(properties));
+                properties, TestAnswerLogs.silent(properties), summaryAnswerer);
     }
 
     /** 挑**小链路**的题：真值比直接调用者多、但规模可控（与第三组实验同一套题源）。 */

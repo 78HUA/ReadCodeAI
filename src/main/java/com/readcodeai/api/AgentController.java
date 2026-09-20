@@ -30,12 +30,17 @@ public class AgentController {
     @PostMapping
     public ApiResponse<AgentAnswer> ask(@RequestBody AgentRequest request) {
         return ApiResponse.ok(agentService.ask(request.repoId(), request.question(),
-                AgentMode.parse(request.mode()), request.scopePath(), request.topK()));
+                AgentMode.parse(request.mode()), request.scopePath(), request.topK(),
+                Boolean.TRUE.equals(request.deep())));
     }
 
     /**
-     * @param mode {@code multi}（默认）= 模型自主多跳；{@code single} = 单跳基线（对比实验用）
+     * @param mode {@code multi}（默认）= 模型自主多跳；{@code single} = 单跳基线（对比实验用）；
+     *             {@code summary} = 总结类问题（一般由系统**自动**判定，见 {@code SummaryIntent}）
+     * @param deep 深链模式：把多跳的轮次/时长/token 额度换大（额度在 {@code readcodeai.llm.deep} 配，
+     *             前端只能选要不要 —— 预算是闸门）。只影响多跳：确定性问题与总结类问题都不经过它
      */
-    public record AgentRequest(Long repoId, String question, String mode, String scopePath, Integer topK) {
+    public record AgentRequest(Long repoId, String question, String mode, String scopePath, Integer topK,
+                               Boolean deep) {
     }
 }

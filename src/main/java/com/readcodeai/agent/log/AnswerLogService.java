@@ -133,13 +133,24 @@ public class AnswerLogService {
      * <p>放这里而不是各调用方：单跳与多跳两条路都记这一栏，形状必须一样。
      */
     public static String routeJson(QueryRouter.Routed routed) {
+        return routeJson(routed, false);
+    }
+
+    /**
+     * @param deep 这次是不是**深链模式** —— 只记 true（默认 false 不写进 JSON），
+     *             这样"深链到底有没有用"将来能用流水数据回答，而不是靠印象。
+     */
+    public static String routeJson(QueryRouter.Routed routed, boolean deep) {
         if (routed == null) {
-            return null;
+            return deep ? "{\"deep\":true}" : null;
         }
         try {
             Map<String, Object> route = new LinkedHashMap<>();
             route.put("route", routed.route().name());
             route.put("targets", routed.targets().stream().map(SymbolView::qualifiedName).toList());
+            if (deep) {
+                route.put("deep", true);
+            }
             return MAPPER.writeValueAsString(route);
         } catch (RuntimeException e) {
             // 序列化不了也要留下最要紧的那一栏

@@ -4,6 +4,7 @@ import com.readcodeai.agent.AgentLoop;
 import com.readcodeai.agent.AgentService;
 import com.readcodeai.agent.AnswerService;
 import com.readcodeai.agent.ScriptedLlmClient;
+import com.readcodeai.agent.SummaryAnswerer;
 import com.readcodeai.agent.ToolRegistry;
 import com.readcodeai.config.ReadCodeAiProperties;
 import com.readcodeai.evidence.EvidenceVerifier;
@@ -70,6 +71,9 @@ class MultiHopComparisonTest {
     @Autowired
     private ReadCodeAiProperties properties;
 
+    @Autowired
+    private SummaryAnswerer summaryAnswerer;
+
     @Test
     void measuresSingleHopAgainstMultiHopOnChainQuestions() {
         RepoView repo = corpus();
@@ -127,7 +131,7 @@ class MultiHopComparisonTest {
                         ScriptedLlmClient.lines(lines.toArray(String[]::new)), 2),
                 queryRouter, queries, ScriptedLlmClient.lines(lines.toArray(String[]::new)),
                 new com.readcodeai.agent.cache.NoopAnswerCache("对比实验不用缓存（每轮都真跑）"), properties,
-                com.readcodeai.verify.TestAnswerLogs.silent(properties));
+                com.readcodeai.verify.TestAnswerLogs.silent(properties), summaryAnswerer);
     }
 
     /**

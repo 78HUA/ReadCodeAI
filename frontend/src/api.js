@@ -49,8 +49,9 @@ export const api = {
     return data
   },
 
-  ask: (repoId, question, mode) =>
-    request('/api/agent', { method: 'POST', body: JSON.stringify({ repoId, question, mode }) }),
+  // deep = 深链模式（把多跳的轮次/时长/token 额度换大；额度在服务端配置，这里只传要不要）
+  ask: (repoId, question, mode, deep = false) =>
+    request('/api/agent', { method: 'POST', body: JSON.stringify({ repoId, question, mode, deep }) }),
   askSingleHop: (repoId, question, scopePath) =>
     request('/api/ask', { method: 'POST', body: JSON.stringify({ repoId, question, scopePath }) }),
 

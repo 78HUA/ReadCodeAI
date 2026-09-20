@@ -454,6 +454,17 @@ public class ReadCodeAiProperties {
          */
         private int keepFullObservations = 2;
 
+        /**
+         * 深链模式（追问页可勾选）：把四维预算里最卡人的三项放宽，用来追长链。
+         *
+         * <p><b>为什么需要它</b>：第三组对比实验里 **2/3 的题是"轮次用尽"停的**
+         * （模型还在查、轨迹里却已经有 60% / 100% 的命中）—— 有些链不是答不了，是没查完。
+         *
+         * <p><b>为什么值是配置而不是前端传参</b>：预算是**闸门**，闸门值只能由部署者定；
+         * 前端能选的只是"要不要深链"，不能自己填 999 —— 那等于把闸门拆了。
+         */
+        private Deep deep = new Deep();
+
         /** 计价参数，仅用于估算成本，不影响调用。 */
         private double inputPricePerMillion = 0;
         private double outputPricePerMillion = 0;
@@ -464,6 +475,7 @@ public class ReadCodeAiProperties {
             requirePositive(maxDurationMs, "readcodeai.llm.max-duration-ms");
             requirePositive(maxEstimatedTokens, "readcodeai.llm.max-estimated-tokens");
             requirePositive(maxEstimatedCost, "readcodeai.llm.max-estimated-cost");
+            deep.validate();
             if (inputPricePerMillion < 0 || outputPricePerMillion < 0) {
                 throw new IllegalStateException("readcodeai.llm 的计价参数不能为负数");
             }
@@ -471,6 +483,52 @@ public class ReadCodeAiProperties {
                 // 0 是合法值（= 不压缩，旧行为），负数没有意义
                 throw new IllegalStateException("readcodeai.llm.keep-full-observations 不能为负数，"
                         + "0 表示不压缩，当前为 " + keepFullObservations);
+            }
+        }
+
+        /**
+         * 深链模式的一组上限。**成本上限不分深浅**（沿用主预算那个值）：
+         * 轮次/时长/token 是可以安全放大的"资源额度"，成本上限则是使用者真正在意的红线。
+         */
+        public static class Deep {
+
+            /** 14 轮 = 最多查 12 跳（与主预算同一套算术：末尾两轮分别留给结论与保底）。 */
+            private int maxRounds = 14;
+
+            /** 深链必然更慢：时长从 60 s 放到 180 s，否则时长会先于轮次触发，额度开了也用不上。 */
+            private long maxDurationMs = 180_000;
+
+            /** 14 轮 × 每轮约 3–4k prompt token（较早轮次已压缩成一行事实），60k 会不够。 */
+            private long maxEstimatedTokens = 120_000;
+
+            void validate() {
+                requirePositive(maxRounds, "readcodeai.llm.deep.max-rounds");
+                requirePositive(maxDurationMs, "readcodeai.llm.deep.max-duration-ms");
+                requirePositive(maxEstimatedTokens, "readcodeai.llm.deep.max-estimated-tokens");
+            }
+
+            public int getMaxRounds() {
+                return maxRounds;
+            }
+
+            public void setMaxRounds(int maxRounds) {
+                this.maxRounds = maxRounds;
+            }
+
+            public long getMaxDurationMs() {
+                return maxDurationMs;
+            }
+
+            public void setMaxDurationMs(long maxDurationMs) {
+                this.maxDurationMs = maxDurationMs;
+            }
+
+            public long getMaxEstimatedTokens() {
+                return maxEstimatedTokens;
+            }
+
+            public void setMaxEstimatedTokens(long maxEstimatedTokens) {
+                this.maxEstimatedTokens = maxEstimatedTokens;
             }
         }
 
@@ -526,6 +584,14 @@ public class ReadCodeAiProperties {
             this.timeoutSeconds = timeoutSeconds;
         }
 
+        public Deep getDeep() {
+            return deep;
+        }
+
+        public void setDeep(Deep deep) {
+            this.deep = deep;
+        }
+
         public int getMaxRounds() {
             return maxRounds;
         }
@@ -535,8 +601,7 @@ public class ReadCodeAiProperties {
         }
 
         public int getKeepFullObservations() {
-            return keepFullObservations;
-        }
+            return keepFullObservations;        }
 
         public void setKeepFullObservations(int keepFullObservations) {
             this.keepFullObservations = keepFullObservations;

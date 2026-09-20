@@ -59,6 +59,14 @@ readcodeai:
     max-duration-ms: 60000
     max-estimated-tokens: 60000
     max-estimated-cost: 0.5
+    # 深链模式（追问页勾选）：把上面三项放宽，用来追长链。
+    # 依据：多跳实验里 2/3 的题是"轮次用尽"停的，而轨迹里已有 60%/100% 的命中 —— 不是答不了，是没查完。
+    # 14 轮 = 最多查 12 跳；时长与 token 跟着放大，否则它们会先于轮次触发、额度开了也用不上。
+    # 成本上限刻意不分深浅（它是红线，不随模式放宽）。
+    deep:
+      max-rounds: 14
+      max-duration-ms: 180000
+      max-estimated-tokens: 120000
     # 计价参数（元/百万 token），只用于成本估算
     input-price-per-million: 0
     output-price-per-million: 0

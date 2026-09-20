@@ -143,6 +143,12 @@ public class QuestionGenerator {
             if (type == null) {
                 continue;
             }
+            // **同名类型也不出题**：项目的判据是"歧义题不出"（对方法做了，这里对类型补齐）。
+            // 实测踩到过：`Material` 有两个（ReviewReport 与 ProjectMaterialBuilder 各一个），
+            // 题目只写简单名 → 解析到哪一个都是合法的，但真值只算了一个 → 那题必然算错。
+            if (sameNamedTypeCount(repoId, type.name()) != 1) {
+                continue;
+            }
             List<SymbolView> members = repository.children(type.id());
             if (members.isEmpty()) {
                 continue;
@@ -211,14 +217,18 @@ public class QuestionGenerator {
         if (owner == null) {
             return false;
         }
-        long sameNamedTypes = repository.findSymbols(repoId, owner.name(), 50).stream()
-                .filter(symbol -> symbol.name().equals(owner.name()))
-                .filter(symbol -> isType(symbol.kind()))
-                .count();
-        if (sameNamedTypes != 1) {
+        if (sameNamedTypeCount(repoId, owner.name()) != 1) {
             return false;
         }
         return repository.findMembersInType(repoId, owner.qualifiedName(), method.name()).size() == 1;
+    }
+
+    /** 这个名字在索引里有几个**类型**（类/接口/枚举/记录）。>1 说明题目没有唯一答案。 */
+    private long sameNamedTypeCount(long repoId, String name) {
+        return repository.findSymbols(repoId, name, 50).stream()
+                .filter(symbol -> symbol.name().equals(name))
+                .filter(symbol -> isType(symbol.kind()))
+                .count();
     }
 
     private static boolean isType(String kind) {

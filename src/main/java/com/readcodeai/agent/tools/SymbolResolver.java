@@ -127,6 +127,14 @@ public final class SymbolResolver {
             return Resolution.none("索引里没有叫「" + name + "」的符号。可以先用 textSearch 搜关键词，"
                     + "或用 findDefinition 试一个类名。");
         }
+        // ③.5 **优先类型而不是它的成员**：构造函数与类同名（实测：查询 "FindImplementationsTool 有哪些成员"
+        // 解析到了构造函数，而构造函数没有成员 → 那一题必然答错）。
+        // 类名指向"那个类"永远比指向"它的某个成员"更符合提问意图。
+        List<SymbolView> typesOnly = byName.stream().filter(symbol -> isTypeKind(symbol.kind())).toList();
+        if (!typesOnly.isEmpty()) {
+            byName = typesOnly;
+        }
+
         Map<String, List<SymbolView>> byOwner = groupByOwner(byName);
         if (byOwner.size() == 1) {
             List<SymbolView> group = byOwner.values().iterator().next();
@@ -141,6 +149,14 @@ public final class SymbolResolver {
                 + (symbol.signature() == null || symbol.signature().isBlank() || symbol.signature().isBlank()
                 ? "" : "  " + symbol.signature())
                 + "  (" + symbol.location() + ")";
+    }
+
+    /** 类型类符号（类/接口/枚举/记录/注解）—— 与 eval 包里那套判据同一个口径。 */
+    static boolean isTypeKind(String kind) {
+        return switch (kind) {
+            case "CLASS", "INTERFACE", "ENUM", "RECORD", "ANNOTATION" -> true;
+            default -> false;
+        };
     }
 
     private static List<SymbolView> lookup(SymbolQueryService queries, long repoId, String text) {

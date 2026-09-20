@@ -383,6 +383,17 @@ com.readcodeai
 
 **为什么不用图数据库**：调用图查询主要是「直接前驱/后继」和「有限跳数递归」，MySQL 8 的递归 CTE 完全够用，且少一个中间件。
 
+> **两张表的现状（2026-09-20 回填）**
+>
+> | 表 | 状态 | 与设计的差异 |
+> |---|---|---|
+> | `answer_log` | ✅ 已建（`schema.sql` 第 13 张表） | 实现时多了四组列：`answered_by`（答案由谁给出，与 `mode` 是两件事）、`cache_hit`（取缓存的那次**没有再花** token）、`support_prompt/completion_tokens`（③ 层核验是**另一笔账**）、`source`（`USER`/`EVAL` —— 评估跑题也走这条流水线，不标出来会把"累计问答"撑起来）。`mode` 取值细化为 `STATIC / SINGLE_HOP / MULTI_HOP`（设计里写的 `AGENT` 现在拆成了单跳与多跳）；`question_id` 因题目目前不落库而暂时恒为空 |
+> | `evidence_check` | ⬜ **未建** | 逐条证据的核验结果目前以**汇总**形式落在 `answer_log.evidence_verified / evidence_rejected / support_status` 上，明细在 `answer_json` 里。**何时必须建**：需要按「哪类 mismatch 最多」做聚合分析时（现在没有可索引的列，只能翻 JSON） |
+>
+> **记账点固定在问答的出口**：`AnswerService.ask` 的包装层（静态 / 单跳 / 拒答 / 模型故障四条返回路径的唯一出口），
+> 加上 `AgentService` 里多跳与"取缓存"两条分支 —— 每个出口只记一次，写失败一律吞掉（账本是账本，不是正确性依赖）。
+> 口径、实测代价与边界见 `verification-log.md`。
+
 > **⚠️ ngram 全文索引的两条硬约束**（实测得出，见 `verification-log.md`，别踩第二遍）：
 > ① 索引用 ngram 是为了让中文注释可检索，但 ngram 会把标识符切成二元组，
 > 所以**必须用短语检索** `AGAINST('"词"' IN BOOLEAN MODE)` —— 自然语言模式会把 `loginCheck`

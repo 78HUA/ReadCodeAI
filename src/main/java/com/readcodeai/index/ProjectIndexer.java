@@ -2,9 +2,11 @@ package com.readcodeai.index;
 
 import com.readcodeai.config.ReadCodeAiProperties;
 import com.readcodeai.index.model.CollectedCall;
+import com.readcodeai.index.model.CollectedChunk;
 import com.readcodeai.index.model.FileOutcome;
 import com.readcodeai.index.parser.AnalyzeResult;
 import com.readcodeai.index.parser.SourceAnalyzer;
+import com.readcodeai.index.parser.TextFileChunker;
 import com.readcodeai.index.store.IndexRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,6 +22,7 @@ import java.nio.file.Path;
 import java.nio.file.PathMatcher;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
@@ -55,6 +58,7 @@ public class ProjectIndexer {
      * 读代码的人得自己去数"这个数组第几个是什么"。一个 record 把进出讲清楚。
      */
     private record Stored(Map<String, Long> symbolIds, List<CollectedCall> edgeable, int orphan,
+                          int textChunkCount,
                           long filesMs, long symbolsMs, long callsMs, long relationsMs, long chunksMs,
                           long otherMs) {
     }
@@ -64,9 +68,16 @@ public class ProjectIndexer {
      *
      * <p>顺序不能变：文件 → 符号 → 调用边 → 类型关系 → 代码块 —— 后三张表都要用前两张表的 id 映射。
      */
-    private Stored storeIndex(long repoId, AnalyzeResult analyzed) {
+    private Stored storeIndex(long repoId, AnalyzeResult analyzed,
+                              List<TextFileChunker.TextChunks> textFiles) {
         long phaseStart = System.nanoTime();
-        Map<String, Long> fileIds = repository.insertSourceFiles(repoId, analyzed.files());
+        Map<String, Long> fileIds = new HashMap<>(repository.insertSourceFiles(repoId, analyzed.files()));
+        if (!textFiles.isEmpty()) {
+            // 文本文件也要有 source_file 行（chunk 的外键指过去），但 kind='TEXT'：
+            // 它们不参与"解析成功率"与"模块划分"，只让内容变得可检索
+            fileIds.putAll(repository.insertTextFiles(repoId,
+                    textFiles.stream().map(TextFileChunker.TextChunks::file).toList()));
+        }
         long filesMs = (System.nanoTime() - phaseStart) / 1_000_000;
 
         phaseStart = System.nanoTime();
@@ -92,7 +103,9 @@ public class ProjectIndexer {
         long relationsMs = (System.nanoTime() - phaseStart) / 1_000_000;
 
         phaseStart = System.nanoTime();
-        repository.insertChunks(repoId, analyzed.chunks(), fileIds, symbolIds);
+        List<CollectedChunk> allChunks = new ArrayList<>(analyzed.chunks());
+        textFiles.forEach(textFile -> allChunks.addAll(textFile.chunks()));
+        repository.insertChunks(repoId, allChunks, fileIds, symbolIds);
         long chunksMs = (System.nanoTime() - phaseStart) / 1_000_000;
 
         // 标 READY 放在同一个事务里：提交那一刻"数据 + 状态"一起生效，
@@ -105,6 +118,7 @@ public class ProjectIndexer {
         long otherMs = (System.nanoTime() - phaseStart) / 1_000_000;
 
         return new Stored(symbolIds, edgeable, orphan,
+                allChunks.size() - analyzed.chunks().size(),
                 filesMs, symbolsMs, callsMs, relationsMs, chunksMs, otherMs);
     }
 
@@ -264,13 +278,16 @@ public class ProjectIndexer {
             AnalyzeResult analyzed = new SourceAnalyzer(sourceRoots, properties.getIndex().getParseThreads())
                     .analyze(root, javaFiles, properties.getIndex().getMaxFileSizeKb(), listener);
 
+            // 文本文件（配置 / SQL / 文档 / 前端源码）：**只做检索**，不进符号表、不算解析统计
+            List<TextFileChunker.TextChunks> textFiles = chunkTextFiles(root);
+
             listener.onProgress("STORING", 0, 0, "写入索引（符号 / 调用图 / 检索单元）");
             long storeStart = System.nanoTime();
             // 落库整段**一个事务**，理由两条：
             // ① 语义：要么整份索引都在，要么一条都不留 —— 早先崩在中间会留下半份数据，只靠 repo.status 兜着；
             // ② 性能：实测落库占索引总耗时 70%，而其中大部分是"每条 INSERT 一次自动提交"（每条都是一次落盘）。
             // 事务边界刻意不含进度回调（回调都在这个块之外）：进度写在另一个事务里才不会被压到提交后可见。
-            Stored stored = transactionTemplate.execute(status -> storeIndex(repoId, analyzed));
+            Stored stored = transactionTemplate.execute(status -> storeIndex(repoId, analyzed, textFiles));
             long storeMillis = (System.nanoTime() - storeStart) / 1_000_000;
             List<CollectedCall> edgeable = stored.edgeable();
             int orphan = stored.orphan();
@@ -283,7 +300,9 @@ public class ProjectIndexer {
             int resolvedEdges = (int) edgeable.stream().filter(CollectedCall::resolved).count();
             IndexSummary summary = new IndexSummary(repoId, name, root.toString(), commitHash,
                     analyzed.files().size(), (int) analyzed.parsedOkCount(), totalLoc,
-                    analyzed.symbols().size(), edgeable.size(), resolvedEdges, analyzed.chunks().size(), orphan,
+                    analyzed.symbols().size(), edgeable.size(), resolvedEdges,
+                    analyzed.chunks().size() + stored.textChunkCount(),
+                    (int) textFiles.stream().filter(f -> f.file().parsedOk()).count(), orphan,
                     repository.unresolvedReasonCounts(repoId),
                     analyzed.parseMillis(), analyzed.resolveMillis(), storeMillis,
                     (System.nanoTime() - start) / 1_000_000);
@@ -319,10 +338,33 @@ public class ProjectIndexer {
         return roots;
     }
 
-    List<Path> collectJavaFiles(Path root, List<Path> sourceRoots) {
-        List<PathMatcher> excludes = properties.getIndex().getExcludePatterns().stream()
+    /**
+     * 收集并切开文本文件。
+     *
+     * <p>扫描范围是**仓库根**（不是 sourceRoots）：{@code pom.xml}、{@code application.yml}、{@code README.md}
+     * 都在根目录下，而 sourceRoots 是 {@code src/main/java} 这类目录。排除规则与 Java 文件共用同一批 glob。
+     */
+    List<TextFileChunker.TextChunks> chunkTextFiles(Path root) {
+        List<PathMatcher> excludes = excludeMatchers();
+        List<Path> textFiles = TextFileChunker.collect(root, excludes);
+        int maxFileSizeKb = properties.getIndex().getMaxFileSizeKb();
+        TextFileChunker chunker = new TextFileChunker();
+        List<TextFileChunker.TextChunks> chunked = new ArrayList<>(textFiles.size());
+        for (Path file : textFiles) {
+            String relativePath = root.relativize(file).toString().replace('\\', '/');
+            chunked.add(chunker.chunk(file, relativePath, maxFileSizeKb));
+        }
+        return chunked;
+    }
+
+    private List<PathMatcher> excludeMatchers() {
+        return properties.getIndex().getExcludePatterns().stream()
                 .map(pattern -> FileSystems.getDefault().getPathMatcher("glob:" + pattern))
                 .toList();
+    }
+
+    List<Path> collectJavaFiles(Path root, List<Path> sourceRoots) {
+        List<PathMatcher> excludes = excludeMatchers();
         TreeSet<Path> files = new TreeSet<>();
         for (Path sourceRoot : sourceRoots) {
             try (Stream<Path> walk = Files.walk(sourceRoot)) {

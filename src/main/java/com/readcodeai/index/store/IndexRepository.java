@@ -78,25 +78,42 @@ public class IndexRepository {
      * 不需要赌驱动的批量自增回填行为。
      */
     public Map<String, Long> insertSourceFiles(long repoId, List<FileOutcome> files) {
+        return insertFiles(repoId, files, "JAVA");
+    }
+
+    /**
+     * 插入**文本文件**的行（{@code kind='TEXT'}）。
+     *
+     * <p>为什么要单独一行方法而不是复用：这两类行的语义完全不同 ——
+     * JAVA 行参与"解析成功率"与模块划分，TEXT 行只是"这份文件里的文本可以被搜到"。
+     * 混在一张表里没关系（chunk 的外键需要一个文件行），但**必须能分得开**，
+     * 否则摘要页的"文件数 / 模块划分"会把 pom.xml、README.md 也算进去，数字就说不清了。
+     */
+    public Map<String, Long> insertTextFiles(long repoId, List<FileOutcome> files) {
+        return insertFiles(repoId, files, "TEXT");
+    }
+
+    private Map<String, Long> insertFiles(long repoId, List<FileOutcome> files, String kind) {
         if (files.isEmpty()) {
             return Map.of();
         }
         Timestamp now = Timestamp.valueOf(LocalDateTime.now());
         jdbc.batchUpdate("""
                 INSERT INTO `source_file`
-                  (repo_id, path, content_hash, loc, parsed_ok, parse_error, indexed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                  (repo_id, path, kind, content_hash, loc, parsed_ok, parse_error, indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, new BatchPreparedStatementSetter() {
             @Override
             public void setValues(PreparedStatement ps, int i) throws SQLException {
                 FileOutcome file = files.get(i);
                 ps.setLong(1, repoId);
                 ps.setString(2, file.relativePath());
-                ps.setString(3, file.contentHash());
-                ps.setInt(4, file.loc());
-                ps.setBoolean(5, file.parsedOk());
-                ps.setString(6, file.errorMessage());
-                ps.setTimestamp(7, now);
+                ps.setString(3, kind);
+                ps.setString(4, file.contentHash());
+                ps.setInt(5, file.loc());
+                ps.setBoolean(6, file.parsedOk());
+                ps.setString(7, file.errorMessage());
+                ps.setTimestamp(8, now);
             }
 
             @Override

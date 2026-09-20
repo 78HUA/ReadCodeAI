@@ -191,14 +191,20 @@ public class SummaryRepository {
                 """.formatted(placeholders), String.class, args);
     }
 
-    /** 每个源文件一行：路径、行数、它的顶层类型限定名、文件里的符号数（模块归并的原始数据）。 */
+    /**
+     * 每个**Java**源文件一行：路径、行数、它的顶层类型限定名、文件里的符号数（模块归并的原始数据）。
+     *
+     * <p>{@code kind = 'JAVA'} 是必须的：文本文件（pom.xml / README.md 等）也被收进了 {@code source_file}
+     * （为了给它们的检索块一个外键），但它们没有包名、没有符号 —— 混进来会让"模块划分的文件数之和
+     * 等于仓库文件数"这条验收断言失真。
+     */
     public List<FileScale> fileScales(long repoId) {
         return jdbc.query("""
                 SELECT f.path, f.loc, s.qualified_name AS type_qname,
                        (SELECT COUNT(*) FROM `symbol` x WHERE x.file_id = f.id) AS symbol_count
                   FROM `source_file` f
                   LEFT JOIN `symbol` s ON s.file_id = f.id AND s.parent_id IS NULL
-                 WHERE f.repo_id = ?
+                 WHERE f.repo_id = ? AND f.kind = 'JAVA'
                  ORDER BY f.path
                 """, (rs, rowNum) -> new FileScale(
                 rs.getString("path"), rs.getInt("loc"),

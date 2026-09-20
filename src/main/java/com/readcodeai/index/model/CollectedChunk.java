@@ -21,4 +21,6 @@ public record CollectedChunk(
 
     public static final String KIND_SYMBOL = "SYMBOL";
     public static final String KIND_FILE_HEADER = "FILE_HEADER";
+    /** 非 Java 文本文件（配置/文档/前端源码等）：**只做检索**，没有符号，也不参与解析统计。 */
+    public static final String KIND_TEXT = "TEXT";
 }

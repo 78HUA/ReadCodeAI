@@ -15,6 +15,8 @@ public record IndexSummary(
         int callEdgeCount,
         int callResolvedCount,
         int chunkCount,
+        /** 收录为"可检索文本"的非 Java 文件数（kind='TEXT'）：**不计入 fileCount / 解析成功率**。 */
+        int textFileCount,
         int orphanEdgeCount,
         Map<String, Integer> unresolvedCallReasons,
         long parseMillis,
@@ -43,7 +45,8 @@ public record IndexSummary(
                 .append(String.format(" (%.2f%%)%n", parseSuccessRate() * 100))
                 .append("代码行数    : ").append(totalLoc).append(System.lineSeparator())
                 .append("符号数      : ").append(symbolCount).append(System.lineSeparator())
-                .append("检索单元    : ").append(chunkCount).append(" 个（按符号切分）")
+                .append("检索单元    : ").append(chunkCount).append(" 个（Java 按符号切分")
+                .append(textFileCount > 0 ? "，另含 " + textFileCount + " 个文本文件按段切分）" : "）")
                 .append(System.lineSeparator())
                 .append("调用边      : ").append(callEdgeCount)
                 .append("  已解析 ").append(callResolvedCount)

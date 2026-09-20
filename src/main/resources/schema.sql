@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS source_file
     repo_id      BIGINT        NOT NULL,
     path         VARCHAR(1024) NOT NULL COMMENT '相对仓库根的路径，统一用 / 分隔',
     -- 内容哈希是「行号漂移」的唯一防线：证据核验时必须比对它，而不是盲信库里的行号
+    kind          VARCHAR(8)  NOT NULL DEFAULT 'JAVA' COMMENT 'JAVA = 参与解析统计；TEXT = 文本文件，只做检索',
     content_hash CHAR(64)      NOT NULL COMMENT 'SHA-256',
     loc          INT           NOT NULL DEFAULT 0,
     parsed_ok    TINYINT       NOT NULL DEFAULT 0,

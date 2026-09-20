@@ -368,10 +368,28 @@ public class ProjectIndexer {
         return chunked;
     }
 
+    /**
+     * 把配置里的 glob 编译成匹配器 —— 每个 {@code **\/x/**} 形式**额外补一个"去掉前缀"的版本**。
+     *
+     * <p>为什么：Java 的 glob 里 {@code **\/target/**} **匹配不到根目录下的 {@code target/}**
+     * （{@code **} 能匹配零个字符，但后面的 {@code /} 要求那里真的有个斜杠）——
+     * 于是"根下的构建产物"从来没被排除过。实测（2026-09-20）：{@code target/} 下
+     * **192 段构建产物进了索引**（编译出来的 application.yml、测试报告……），
+     * 本地还会把 {@code frontend/node_modules} 一起收进来。
+     *
+     * <p>后果不只是浪费：检索会命中"构建出来的副本"，而且那些文件在索引之后还会被重写，
+     * **证据核验必然对不上**（CI 第一次跑抓到的就是这个）。
+     * 补一个去前缀的版本之后，用户的 {@code **\/x/**} 写法在根目录与子目录下都生效。
+     */
     private List<PathMatcher> excludeMatchers() {
-        return properties.getIndex().getExcludePatterns().stream()
-                .map(pattern -> FileSystems.getDefault().getPathMatcher("glob:" + pattern))
-                .toList();
+        List<PathMatcher> matchers = new ArrayList<>();
+        for (String pattern : properties.getIndex().getExcludePatterns()) {
+            matchers.add(FileSystems.getDefault().getPathMatcher("glob:" + pattern));
+            if (pattern.startsWith("**/")) {
+                matchers.add(FileSystems.getDefault().getPathMatcher("glob:" + pattern.substring(3)));
+            }
+        }
+        return matchers;
     }
 
     List<Path> collectJavaFiles(Path root, List<Path> sourceRoots) {

@@ -70,10 +70,15 @@ readcodeai:
     optimize-fulltext-threshold: 200
     # 远程仓库拉取后的存放目录（放在用户目录下，免得把下载的第三方代码混进项目工作区）
     workspace: ${user.home}/.readcodeai/repos
+    # 构建产物与依赖目录不进索引：它们会在索引之后被重写（证据核验必然对不上），而且不是源码
+    # 注：`**/x/**` 这种写法在 Java 的 glob 里匹配不到**根目录**下的 x/ —— 代码里会自动补一个去前缀的版本
     exclude-patterns:
       - "**/target/**"
       - "**/build/**"
       - "**/generated/**"
+      - "**/node_modules/**"
+      - "**/dist/**"
+      - "**/.git/**"
   cache:
     # 答案缓存：同一个问题（同一份索引）第二次问时直接给上次的结果，不再花 10—40 秒与几千 token
     enabled: ${READCODEAI_CACHE_ENABLED:true}

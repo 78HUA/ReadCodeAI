@@ -105,6 +105,38 @@ class TextFileIndexTest {
     }
 
     @Test
+    void buildOutputAndDependenciesAtTheRepoRootAreExcluded() throws IOException {
+        // 回归：Java 的 glob 里 `**/target/**` **匹配不到根目录下的 target/**
+        // （`**` 能匹配零字符，但后面的 `/` 要求真有个斜杠）—— 于是构建产物一直进了索引。
+        // 后果：检索命中"构建出来的副本"，而它们在索引之后还会被重写 → 证据核验必然对不上
+        //（CI 第一次跑抓到的就是这个）。
+        Path repo = tempDir.resolve("repo-with-build-output");
+        Path src = repo.resolve("src/main/java/demo");
+        Files.createDirectories(src);
+        Files.writeString(src.resolve("Keep.java"), "package demo;\npublic class Keep {}\n",
+                StandardCharsets.UTF_8);
+
+        // 这些都不该进索引：根下的构建产物、前端依赖、子模块里的 target/、打包产物
+        for (String junkPath : List.of("target/classes/copied.yml", "node_modules/pkg/index.js",
+                "module-a/target/generated.txt", "dist/bundle.js")) {
+            Path file = repo.resolve(junkPath);
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, "must-not-be-indexed\n", StandardCharsets.UTF_8);
+        }
+
+        IndexSummary summary = indexer.index(repo);
+        List<String> indexedPaths = jdbc.queryForList(
+                "SELECT f.path FROM `source_file` f WHERE f.repo_id = ? ORDER BY f.path",
+                String.class, summary.repoId());
+
+        System.out.printf("%n[排除规则] 索引到的文件：%s%n", indexedPaths);
+        assertThat(indexedPaths).as("构建产物与依赖目录一个都不该进索引")
+                .containsExactly("src/main/java/demo/Keep.java");
+
+        indexer.deleteIndex(summary.repoId());
+    }
+
+    @Test
     void realCorpusPicksUpItsConfigAndDocs() {
         var corpus = TestCorpus.resolve(indexer, queries);
         assumeTrue(corpus.isPresent(), "语料不存在（sample-repos 或 -Dreadcodeai.verify.repo=），跳过");

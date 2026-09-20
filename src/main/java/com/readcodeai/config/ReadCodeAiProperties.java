@@ -595,7 +595,8 @@ public class ReadCodeAiProperties {
         private String workspace = System.getProperty("user.home") + "/.readcodeai/repos";
 
         private java.util.List<String> excludePatterns = new java.util.ArrayList<>(
-                java.util.List.of("**/target/**", "**/build/**", "**/generated/**"));
+                java.util.List.of("**/target/**", "**/build/**", "**/generated/**",
+                        "**/node_modules/**", "**/dist/**", "**/.git/**"));
 
         /**
          * 解析文件的并行度：{@code 0} = 自动（核数与 8 取小），{@code 1} = 串行。

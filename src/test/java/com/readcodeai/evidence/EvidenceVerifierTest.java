@@ -192,16 +192,22 @@ class EvidenceVerifierTest {
     @Test
     void treatsAnIllegalPathAsABadEvidenceInsteadOfCrashing() throws IOException {
         // 第 5 步的真实模型实验撞出来的：模型把行号写进了 file 字段（"...Real.java:4"），
-        // 路径解析直接抛 InvalidPathException（Windows 路径不允许冒号），整次问答崩掉。
+        // 路径解析直接抛 InvalidPathException（**Windows 路径不允许冒号**），整次问答崩掉。
         // 核验层的职责是**挡住脏数据**，它自己反倒崩了就本末倒置了。
+        //
+        // ⚠️ 这条断言不能写死原因文案：冒号在 Linux 上是合法字符，那边的路径会正常解析、
+        // 只是文件不存在 —— 两种情况都是"坏证据被挡住"，**平台差异不该让测试红**。
+        // （这个假设是 CI 第一次跑就抓出来的：同一个串在 Windows 报"路径不合法"、在 Linux 报"文件不存在"。）
         write("src/Real.java", REAL_FILE);
 
         var report = verifier.verify(root(), List.of(
                 new AskEvidence("src/Real.java:4", 4, 6, "", "行号被写进了路径")));
 
-        assertThat(report.failed()).isEqualTo(1);
+        assertThat(report.failed()).as("脏路径必须被挡住（不通过核验），而不是让请求崩掉").isEqualTo(1);
         assertThat(report.evidence().get(0).failureKind()).isEqualTo(FailureKind.FILE_NOT_FOUND);
-        assertThat(report.evidence().get(0).detail()).contains("路径不合法");
+        assertThat(report.evidence().get(0).detail())
+                .as("原因可以是「路径不合法」（Windows）或「文件不存在」（Linux），但必须说清")
+                .containsAnyOf("路径不合法", "文件不存在");
     }
 
     @Test

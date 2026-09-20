@@ -67,9 +67,16 @@ class QaSweepTest {
     @Autowired
     private SymbolQueryService queryService;
 
+    @Autowired
+    private com.readcodeai.config.LlmClient llmClient;
+
     @Test
     void sweepsRealQuestionsAndWritesAWorksheet() throws IOException {
         // 显式锁定语料 —— 不能用「最近索引的仓库」，那个全局状态会被别的测试（比如远程拉取）改变
+        // **没配模型就跳过**：这一轮抽查问的是语义问题，缺 Key 时会抛「未配置 LLM」，
+        // 而下面把异常记成"调用失败"并断言为 0 —— 不加这道门禁，CI（没有 Key）就会红。
+        // 判据用的是"能不能用"，不是"某个环境的变量名"：CI、本地、换机器行为一致。
+        com.readcodeai.verify.LiveLlm.assumeReachable(llmClient);
         var corpus = TestCorpus.resolve(indexer, queryService);
         org.junit.jupiter.api.Assumptions.assumeTrue(corpus.isPresent(),
                 "语料 " + TestCorpus.SAMPLE + " 不存在，跳过");

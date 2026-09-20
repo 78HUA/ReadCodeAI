@@ -1,0 +1,66 @@
+# 持续集成：每次 push 自动跑一遍**离线测试集**（不调真模型）。
+#
+# 为什么 CI 里不放 API Key：
+#   ① 凭据不进 CI（和"密钥不落仓库"同一条纪律）；
+#   ② 免费档接口本身会波动，把"外部抖动"变成"CI 红"，红了就没人看了；
+#   ③ 会让每次 push 都真的花钱/花额度。
+# 于是"没配 Key"这件事本身就成了离线集的门禁：会调模型的用例自己会跳过
+# （LiveLlm.assumeReachable），要跑它们就在本地按需跑、或到里程碑时跑全量。
+#
+# 语料用**这个项目自己**（-Dreadcodeai.verify.repo=.）：索引类测试需要一个 Java 仓库，
+# 而 ReadCodeAI 本身就是 —— 零下载、零合规风险，几秒索引完。
+name: test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # 测试要 MySQL（ngram 全文检索）与 Redis（缓存/锁/限流）：临时容器，跑完即销毁
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: 123456
+          MYSQL_DATABASE: readcodeai      # 库自动建好，表由应用启动时的 schema.sql 建
+        ports: [ 3306:3306 ]
+        options: >-
+          --health-cmd="mysqladmin ping -h127.0.0.1 -uroot -p123456"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      redis:
+        image: redis:7
+        ports: [ 6379:6379 ]
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 JDK 21 并缓存 Maven 依赖
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: 跑离线测试集
+        env:
+          READCODEAI_DB_PASSWORD: 123456
+        run: mvn -B test -Dreadcodeai.verify.repo=.
+
+      - name: 失败时把测试报告存成产物（排查用）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports/

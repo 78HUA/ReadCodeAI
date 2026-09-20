@@ -218,6 +218,17 @@ public class ReadCodeAiProperties {
         private long maxEstimatedTokens = 60_000;
         private double maxEstimatedCost = 0.5;
 
+        /**
+         * 多跳的提示词里保留多少跳的**原始输出**；更早的轮次压成一行事实（跳数 + 查到哪些名字 + 证据位置）。
+         *
+         * <p>为什么要它：每轮都要把整份记录重发，旧轮次的代码文本占了绝大部分，
+         * token 随轮数近似平方增长（实测单题 6k–15k token）。压掉代码文本、留下名字与位置，
+         * 模型该有的推理骨架一条不少。
+         *
+         * <p>{@code 0} = 完全不压缩（旧行为），保留它是为了 A/B 对照和"万一压坏了"的逃生门。
+         */
+        private int keepFullObservations = 2;
+
         /** 计价参数，仅用于估算成本，不影响调用。 */
         private double inputPricePerMillion = 0;
         private double outputPricePerMillion = 0;
@@ -230,6 +241,11 @@ public class ReadCodeAiProperties {
             requirePositive(maxEstimatedCost, "readcodeai.llm.max-estimated-cost");
             if (inputPricePerMillion < 0 || outputPricePerMillion < 0) {
                 throw new IllegalStateException("readcodeai.llm 的计价参数不能为负数");
+            }
+            if (keepFullObservations < 0) {
+                // 0 是合法值（= 不压缩，旧行为），负数没有意义
+                throw new IllegalStateException("readcodeai.llm.keep-full-observations 不能为负数，"
+                        + "0 表示不压缩，当前为 " + keepFullObservations);
             }
         }
 
@@ -293,6 +309,14 @@ public class ReadCodeAiProperties {
             this.maxRounds = maxRounds;
         }
 
+        public int getKeepFullObservations() {
+            return keepFullObservations;
+        }
+
+        public void setKeepFullObservations(int keepFullObservations) {
+            this.keepFullObservations = keepFullObservations;
+        }
+
         public long getMaxDurationMs() {
             return maxDurationMs;
         }
@@ -348,6 +372,14 @@ public class ReadCodeAiProperties {
         private java.util.List<String> excludePatterns = new java.util.ArrayList<>(
                 java.util.List.of("**/target/**", "**/build/**", "**/generated/**"));
 
+        /**
+         * 解析文件的并行度：{@code 0} = 自动（核数与 8 取小），{@code 1} = 串行。
+         *
+         * <p>为什么要留串行这个挡位：它是**并行改动的对照组**（同一个 JVM 里先跑串行再跑并行，
+         * 排除 JIT 与磁盘缓存的干扰），也是"万一并行出怪事"的逃生门。
+         */
+        private int parseThreads = 0;
+
         void validate() {
             if (maxFileSizeKb <= 0) {
                 throw new IllegalStateException("readcodeai.index.max-file-size-kb 必须大于 0");
@@ -355,6 +387,18 @@ public class ReadCodeAiProperties {
             if (workspace == null || workspace.isBlank()) {
                 throw new IllegalStateException("readcodeai.index.workspace 不能为空");
             }
+            if (parseThreads < 0) {
+                throw new IllegalStateException("readcodeai.index.parse-threads 不能为负数"
+                        + "（0 = 自动，1 = 串行），当前为 " + parseThreads);
+            }
+        }
+
+        public int getParseThreads() {
+            return parseThreads;
+        }
+
+        public void setParseThreads(int parseThreads) {
+            this.parseThreads = parseThreads;
         }
 
         public String getWorkspace() {

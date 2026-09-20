@@ -3,7 +3,9 @@ spring:
     name: readcodeai
   datasource:
     # 口令只从环境变量读，不进仓库：本机开发用 export READCODEAI_DB_PASSWORD=123456
-    url: jdbc:mysql://${READCODEAI_DB_HOST:127.0.0.1}:${READCODEAI_DB_PORT:3306}/readcodeai?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    # rewriteBatchedStatements：让驱动把 batchUpdate 改写成多值 INSERT —— 不开它，
+    # 一千次批处理仍然是一千次往返（实测十万行语料落库 13.5 秒，其中大头就是这个）
+    url: jdbc:mysql://${READCODEAI_DB_HOST:127.0.0.1}:${READCODEAI_DB_PORT:3306}/readcodeai?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true
     username: ${READCODEAI_DB_USERNAME:root}
     password: ${READCODEAI_DB_PASSWORD:}
   sql:
@@ -39,6 +41,9 @@ readcodeai:
     # 多跳检索的四维预算：轮次 / 时长 / token / 成本，任一超限即停
     # 轮次上限 8 = 最多查 6 跳 + 1 轮结论 + 1 轮保底（**最后一轮留给结论**，模型在这轮要求调工具就停机）
     max-rounds: 8
+    # 提示词里保留多少跳的原始输出；更早的轮次压成一行事实（跳数+查到的名字+证据位置）
+    # 设 0 = 不压缩（旧行为，A/B 对照与逃生门用）
+    keep-full-observations: 2
     max-duration-ms: 60000
     max-estimated-tokens: 60000
     max-estimated-cost: 0.5
@@ -47,6 +52,8 @@ readcodeai:
     output-price-per-million: 0
   index:
     max-file-size-kb: 2048
+    # 解析并行度：0 = 自动（核数与 8 取小），1 = 串行（并行改动的对照组，也是逃生门）
+    parse-threads: 0
     # 远程仓库拉取后的存放目录（放在用户目录下，免得把下载的第三方代码混进项目工作区）
     workspace: ${user.home}/.readcodeai/repos
     exclude-patterns:

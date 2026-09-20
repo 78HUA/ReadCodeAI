@@ -48,6 +48,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.StringJoiner;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * 把一个 Java 仓库解析成符号表、调用边与类型关系。
@@ -70,88 +74,200 @@ public class SourceAnalyzer {
 
     private static final int JAVADOC_MAX = 500;
 
-    private final JavaParser parser;
+    /** 并行解析的线程上限：解析是 CPU 密集的，线程再多只是互相抢内存带宽与 GC。 */
+    private static final int MAX_PARSE_THREADS = 8;
+
+    /**
+     * 每个线程一份 JavaParser。
+     *
+     * <p>为什么不能共用：{@code JavaParser} 持有可变的解析器实例（实测确认），
+     * 并发调用会互相踩。而 JavaParser 的构造很轻（配置 + 解析器），
+     * 真正的重家伙是**类型求解器**——那个只在本类里由阶段二串行使用，所以可以共享一份。
+     *
+     * <p>每个线程的 parser 仍注入同一个 {@link JavaSymbolSolver}：注入只是往 CompilationUnit
+     * 上挂一个引用，解析阶段并不触发求解，求解全部发生在阶段二（串行）。
+     */
+    private final ThreadLocal<JavaParser> threadParser;
+
+    private final JavaSymbolSolver symbolSolver;
+
+    /** 并行度：0 = 自动（核数与 8 取小），1 = 串行（对照组）。 */
+    private final int parseThreads;
 
     public SourceAnalyzer(List<Path> sourceRoots) {
+        this(sourceRoots, 0);
+    }
+
+    public SourceAnalyzer(List<Path> sourceRoots, int parseThreads) {
         CombinedTypeSolver typeSolver = new CombinedTypeSolver();
         // JDK 自带类型走反射；仓库内类型走源码解析
         typeSolver.add(new ReflectionTypeSolver(false));
         for (Path root : sourceRoots) {
             typeSolver.add(new JavaParserTypeSolver(root));
         }
-        this.parser = new JavaParser(new ParserConfiguration()
+        this.symbolSolver = new JavaSymbolSolver(typeSolver);
+        this.parseThreads = Math.max(0, parseThreads);
+        this.threadParser = ThreadLocal.withInitial(this::newParser);
+    }
+
+    private JavaParser newParser() {
+        return new JavaParser(new ParserConfiguration()
                 .setLanguageLevel(ParserConfiguration.LanguageLevel.JAVA_21)
                 // 注意：JavaParser 3.28 的方法名是 setSymbolResolver（不是 setSymbolSolver）
-                .setSymbolResolver(new JavaSymbolSolver(typeSolver)));
+                .setSymbolResolver(symbolSolver));
+    }
+
+    /** 一个文件的解析产物：按**文件下标**归并，合并后的顺序与串行版逐条一致。 */
+    private record FileParse(String relativePath, FileOutcome outcome, ParsedFile parsed,
+                             List<String> lines, List<CollectedSymbol> symbols, Set<String> symbolKeys) {
+
+        static FileParse failed(String relativePath, FileOutcome outcome) {
+            return new FileParse(relativePath, outcome, null, List.of(), List.of(), Set.of());
+        }
+    }
+
+    /**
+     * 逐个文件独立地「读 → 解析 → 收集符号」，**按文件并行、按原顺序归并**。
+     *
+     * <p>为什么这三个步骤能并行：它们之间没有任何跨文件依赖 —— 读的是自己的文件、
+     * 建的是自己的 AST、收的是自己的符号（阶段二才需要"全仓库有哪些符号"这份全局视图）。
+     *
+     * <p>为什么进度要**由主线程按序发出**：① 顺序对使用者就是读数（跳回 300 再变 400 就是 bug）；
+     * ② 回调实现（写 index_job 的那层）不保证线程安全。代价是若某个文件特别慢，
+     * 进度会在它前面停一下 —— 单个文件是毫秒级，这个代价可以忽略。
+     */
+    private List<FileParse> parseAll(Path repoRoot, List<Path> javaFiles, int maxFileSizeKb,
+                                     com.readcodeai.index.ProgressListener listener) {
+        int threads = parseThreads > 0 ? parseThreads
+                : Math.min(MAX_PARSE_THREADS, Math.max(1, Runtime.getRuntime().availableProcessors()));
+        FileParse[] results = new FileParse[javaFiles.size()];
+        if (threads == 1 || javaFiles.size() == 1) {
+            for (int i = 0; i < javaFiles.size(); i++) {
+                results[i] = parseOne(repoRoot, javaFiles.get(i), maxFileSizeKb);
+                report(listener, javaFiles.size(), results[i], i + 1);
+            }
+            return List.of(results);
+        }
+
+        ExecutorService pool = Executors.newFixedThreadPool(threads, runnable -> {
+            Thread thread = new Thread(runnable, "index-parse");
+            thread.setDaemon(true);
+            return thread;
+        });
+        try {
+            List<Future<FileParse>> futures = new ArrayList<>(javaFiles.size());
+            for (Path file : javaFiles) {
+                futures.add(pool.submit(() -> parseOne(repoRoot, file, maxFileSizeKb)));
+            }
+            int parsed = 0;
+            for (int i = 0; i < futures.size(); i++) {
+                try {
+                    results[i] = futures.get(i).get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("解析被中断", e);
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause();
+                    if (cause instanceof RuntimeException runtime) {
+                        throw runtime;
+                    }
+                    throw new IllegalStateException("解析失败：" + cause, cause);
+                }
+                if (results[i].parsed() != null) {
+                    parsed++;
+                }
+                // 与串行版同一口径：只对**解析成功**的文件推进度（失败与跳过的文件不计入分子）
+                if (results[i].parsed() != null) {
+                    listener.onProgress("PARSING", parsed, javaFiles.size(), results[i].relativePath());
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        return List.of(results);
+    }
+
+    private static void report(com.readcodeai.index.ProgressListener listener, int total,
+                               FileParse parse, int parsed) {
+        if (parse.parsed() != null) {
+            listener.onProgress("PARSING", parsed, total, parse.relativePath());
+        }
+    }
+
+    /** 单文件的「读 → 解析 → 收集符号」。任何失败都变成一条 outcome，不抛异常 —— 一个文件坏掉不该拖垮整仓库。 */
+    private FileParse parseOne(Path repoRoot, Path file, int maxFileSizeKb) {
+        String relativePath = repoRoot.relativize(file).toString().replace('\\', '/');
+        long sizeKb;
+        try {
+            sizeKb = Files.size(file) / 1024;
+        } catch (IOException e) {
+            sizeKb = 0;
+        }
+        if (sizeKb > maxFileSizeKb) {
+            return FileParse.failed(relativePath, new FileOutcome(relativePath, "", 0, false,
+                    "文件超过 " + maxFileSizeKb + " KB，已跳过"));
+        }
+
+        String content;
+        int loc;
+        try {
+            content = Files.readString(file, StandardCharsets.UTF_8);
+            loc = (int) content.lines().count();
+        } catch (IOException e) {
+            return FileParse.failed(relativePath, new FileOutcome(relativePath, "", 0, false,
+                    "读取失败：" + e.getClass().getSimpleName() + "（可能是非 UTF-8 编码）"));
+        }
+
+        ParseResult<CompilationUnit> result;
+        try {
+            // JavaParser 的 parse(Path) 自己会再读一次文件，这里也可能失败
+            result = threadParser.get().parse(file);
+        } catch (IOException e) {
+            return FileParse.failed(relativePath, new FileOutcome(relativePath, sha256(content), loc, false,
+                    "解析时读取失败：" + e.getClass().getSimpleName()));
+        }
+        if (!result.isSuccessful() || result.getResult().isEmpty()) {
+            String reason = result.getProblems().isEmpty()
+                    ? "未知解析错误"
+                    : result.getProblems().get(0).getMessage();
+            return FileParse.failed(relativePath, new FileOutcome(relativePath, sha256(content), loc, false, reason));
+        }
+
+        CompilationUnit unit = result.getResult().get();
+        ParsedFile parsedFile = new ParsedFile(relativePath, unit);
+        List<CollectedSymbol> symbols = new ArrayList<>();
+        Set<String> symbolKeys = new HashSet<>();
+        String packageName = packageOf(unit);
+        for (TypeDeclaration<?> type : unit.getTypes()) {
+            collectType(type, null, packageName, relativePath, symbols, parsedFile.rawCalls(), symbolKeys);
+        }
+        return new FileParse(relativePath,
+                new FileOutcome(relativePath, sha256(content), loc, true, null),
+                parsedFile, content.lines().toList(), symbols, symbolKeys);
     }
 
     public AnalyzeResult analyze(Path repoRoot, List<Path> javaFiles, int maxFileSizeKb,
                                  com.readcodeai.index.ProgressListener listener) {
-        List<FileOutcome> outcomes = new ArrayList<>();
-        List<ParsedFile> parsedFiles = new ArrayList<>();
-        // 文件行文本留一份：生成检索单元时要按行切片，切出来的必须是源文件原文（行号与内容都要能回磁盘核对）
-        Map<String, List<String>> linesByFile = new HashMap<>();
-
-        // ---- 解析 ----
+        // ---- 解析 + 阶段一（收集符号）：按文件并行，结果按原序归并 ----
         long parseStart = System.nanoTime();
-        int parsed = 0;
-        for (Path file : javaFiles) {
-            String relativePath = repoRoot.relativize(file).toString().replace('\\', '/');
-            long sizeKb;
-            try {
-                sizeKb = Files.size(file) / 1024;
-            } catch (IOException e) {
-                sizeKb = 0;
-            }
-            if (sizeKb > maxFileSizeKb) {
-                outcomes.add(new FileOutcome(relativePath, "", 0, false,
-                        "文件超过 " + maxFileSizeKb + " KB，已跳过"));
-                continue;
-            }
-
-            String content;
-            int loc;
-            try {
-                content = Files.readString(file, StandardCharsets.UTF_8);
-                loc = (int) content.lines().count();
-            } catch (IOException e) {
-                outcomes.add(new FileOutcome(relativePath, "", 0, false,
-                        "读取失败：" + e.getClass().getSimpleName() + "（可能是非 UTF-8 编码）"));
-                continue;
-            }
-
-            ParseResult<CompilationUnit> result;
-            try {
-                result = parser.parse(file);
-            } catch (IOException e) {
-                // JavaParser 的 parse(Path) 自己会再读一次文件，这里也可能失败
-                outcomes.add(new FileOutcome(relativePath, sha256(content), loc, false,
-                        "解析时读取失败：" + e.getClass().getSimpleName()));
-                continue;
-            }
-            if (!result.isSuccessful() || result.getResult().isEmpty()) {
-                String reason = result.getProblems().isEmpty()
-                        ? "未知解析错误"
-                        : result.getProblems().get(0).getMessage();
-                outcomes.add(new FileOutcome(relativePath, sha256(content), loc, false, reason));
-                continue;
-            }
-            outcomes.add(new FileOutcome(relativePath, sha256(content), loc, true, null));
-            parsedFiles.add(new ParsedFile(relativePath, result.getResult().get()));
-            linesByFile.put(relativePath, content.lines().toList());
-            // 每个文件解析完报一次（写库节流在调用方做）—— 长任务必须能报出"到第几个了"
-            listener.onProgress("PARSING", ++parsed, javaFiles.size(), relativePath);
-        }
+        List<FileParse> parses = parseAll(repoRoot, javaFiles, maxFileSizeKb, listener);
         long parseMillis = (System.nanoTime() - parseStart) / 1_000_000;
 
-        // ---- 阶段一：收集符号 ----
+        List<FileOutcome> outcomes = new ArrayList<>(parses.size());
+        List<ParsedFile> parsedFiles = new ArrayList<>(parses.size());
+        // 文件行文本留一份：生成检索单元时要按行切片，切出来的必须是源文件原文（行号与内容都要能回磁盘核对）
+        Map<String, List<String>> linesByFile = new HashMap<>();
         Set<String> symbolKeys = new HashSet<>();
         List<CollectedSymbol> symbols = new ArrayList<>();
-        for (ParsedFile parsedFile : parsedFiles) {
-            String packageName = packageOf(parsedFile.unit());
-            for (TypeDeclaration<?> type : parsedFile.unit().getTypes()) {
-                collectType(type, null, packageName, parsedFile.relativePath(), symbols, parsedFile.rawCalls(), symbolKeys);
+        for (FileParse parse : parses) {
+            outcomes.add(parse.outcome());
+            if (parse.parsed() == null) {
+                continue;
             }
+            parsedFiles.add(parse.parsed());
+            linesByFile.put(parse.relativePath(), parse.lines());
+            symbols.addAll(parse.symbols());
+            symbolKeys.addAll(parse.symbolKeys());
         }
 
         // ---- 阶段二：解析调用与继承关系（现在才知道仓库内有哪些符号）----

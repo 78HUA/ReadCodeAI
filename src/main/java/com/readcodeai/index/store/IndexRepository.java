@@ -5,12 +5,14 @@ import com.readcodeai.index.model.CollectedChunk;
 import com.readcodeai.index.model.CollectedSymbol;
 import com.readcodeai.index.model.CollectedTypeRelation;
 import com.readcodeai.index.model.FileOutcome;
+import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
 
 import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
@@ -24,8 +26,11 @@ import java.util.Map;
  * <p>刻意用 JdbcTemplate 手写 SQL 而不是 ORM：这些表就是为查询建的，SQL 更直白，
  * 也更好解释「为什么这么建索引」。
  *
- * <p>符号要拿到自增 id 才能建调用边，所以符号是逐条插入（本地 MySQL 下千级插入耗时可忽略）；
- * 调用边数量大且不需要回填 id，用批量插入。
+ * <p><b>为什么 source_file / symbol 也要批量插入</b>：它们的量级不大（千级），早先逐条插入
+ * 图的是"顺手拿到自增 id"。但实测（gson 2.3 万行）落库占整个索引耗时的 70%，
+ * 逐条插入意味着**每条一次网络往返 + 一次自动提交**（无事务时每次 INSERT 都是一个事务）——
+ * 这才是那 12 秒的来源。改成批量插入 + **一次 SELECT 回填 id 映射**，
+ * 语义完全不变（同名符号"后者覆盖前者"的规则靠 SELECT 的 id 升序复现），往返从 N 次降到 2 次。
  */
 @Repository
 public class IndexRepository {
@@ -65,18 +70,26 @@ public class IndexRepository {
         return key.longValue();
     }
 
-    /** @return 相对路径 -> source_file.id */
+    /**
+     * 批量插入文件记录，再**一次查回** 相对路径 -> id。
+     *
+     * <p>为什么不用 {@code GeneratedKeyHolder} 逐条拿 id：那正是慢的来源（每条一次往返+提交）。
+     * 批量插入拿不到"逐行主键"，而按 {@code repo_id} 一次查回来既便宜又更稳 ——
+     * 不需要赌驱动的批量自增回填行为。
+     */
     public Map<String, Long> insertSourceFiles(long repoId, List<FileOutcome> files) {
-        Map<String, Long> ids = new HashMap<>(files.size() * 2);
+        if (files.isEmpty()) {
+            return Map.of();
+        }
         Timestamp now = Timestamp.valueOf(LocalDateTime.now());
-        for (FileOutcome file : files) {
-            KeyHolder keyHolder = new GeneratedKeyHolder();
-            jdbc.update(connection -> {
-                PreparedStatement ps = connection.prepareStatement("""
-                        INSERT INTO `source_file`
-                          (repo_id, path, content_hash, loc, parsed_ok, parse_error, indexed_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """, Statement.RETURN_GENERATED_KEYS);
+        jdbc.batchUpdate("""
+                INSERT INTO `source_file`
+                  (repo_id, path, content_hash, loc, parsed_ok, parse_error, indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, new BatchPreparedStatementSetter() {
+            @Override
+            public void setValues(PreparedStatement ps, int i) throws SQLException {
+                FileOutcome file = files.get(i);
                 ps.setLong(1, repoId);
                 ps.setString(2, file.relativePath());
                 ps.setString(3, file.contentHash());
@@ -84,57 +97,100 @@ public class IndexRepository {
                 ps.setBoolean(5, file.parsedOk());
                 ps.setString(6, file.errorMessage());
                 ps.setTimestamp(7, now);
-                return ps;
-            }, keyHolder);
-            Number key = keyHolder.getKey();
-            if (key != null) {
-                ids.put(file.relativePath(), key.longValue());
             }
-        }
+
+            @Override
+            public int getBatchSize() {
+                return files.size();
+            }
+        });
+
+        Map<String, Long> ids = new HashMap<>(files.size() * 2);
+        jdbc.query("SELECT id, path FROM `source_file` WHERE repo_id = ?",
+                rs -> {
+                    ids.put(rs.getString("path"), rs.getLong("id"));
+                }, repoId);
         return ids;
     }
 
     /**
-     * 插入符号并回填父类型 id。
+     * 批量插入符号，再**一次查回** 检索键 -> id，最后批量回填 parent_id。
      *
-     * <p>依赖 analyze 的输出顺序：父类型一定排在它的成员之前，所以「已在表里的键」就是父 id。
+     * <p>父 id 不再依赖"父符号必须排在前、边插边查"（那是逐条插时代的写法），
+     * 而是插完再回填一次 —— 顺序依赖消失，语义不变（{@code analyze} 本来也保证了父先于子）。
+     *
+     * <p>同名符号"后者覆盖前者"的规则靠 SELECT 的 **id 升序**复现：id 由批量插入的语句顺序决定，
+     * 与旧版逐条插入完全一致。
      *
      * @return 符号检索键 -> symbol.id
      */
     public Map<String, Long> insertSymbols(long repoId, List<CollectedSymbol> symbols,
                                            Map<String, Long> fileIds) {
-        Map<String, Long> ids = new HashMap<>(symbols.size() * 2);
-        for (CollectedSymbol symbol : symbols) {
-            Long fileId = fileIds.get(symbol.filePath());
-            if (fileId == null) {
-                continue;
-            }
-            Long parentId = symbol.parentQualifiedName() == null ? null : ids.get(symbol.parentQualifiedName());
-            KeyHolder keyHolder = new GeneratedKeyHolder();
-            jdbc.update(connection -> {
-                PreparedStatement ps = connection.prepareStatement(INSERT_SYMBOL, Statement.RETURN_GENERATED_KEYS);
+        List<CollectedSymbol> insertable = symbols.stream()
+                .filter(symbol -> fileIds.containsKey(symbol.filePath()))
+                .toList();
+        if (insertable.isEmpty()) {
+            return Map.of();
+        }
+        jdbc.batchUpdate(INSERT_SYMBOL, new BatchPreparedStatementSetter() {
+            @Override
+            public void setValues(PreparedStatement ps, int i) throws SQLException {
+                CollectedSymbol symbol = insertable.get(i);
                 ps.setLong(1, repoId);
-                ps.setLong(2, fileId);
+                ps.setLong(2, fileIds.get(symbol.filePath()));
                 ps.setString(3, symbol.kind());
                 ps.setString(4, symbol.name());
                 ps.setString(5, symbol.qualifiedName());
                 ps.setString(6, symbol.signature());
-                if (parentId == null) {
-                    ps.setNull(7, java.sql.Types.BIGINT);
-                } else {
-                    ps.setLong(7, parentId);
-                }
+                // parent_id 全部先留空：父子关系在下面用一次批量 UPDATE 回填
+                ps.setNull(7, java.sql.Types.BIGINT);
                 ps.setInt(8, symbol.startLine());
                 ps.setInt(9, symbol.endLine());
                 ps.setString(10, symbol.modifiers());
                 ps.setString(11, symbol.returnType());
                 ps.setString(12, symbol.javadoc());
-                return ps;
-            }, keyHolder);
-            Number key = keyHolder.getKey();
-            if (key != null) {
-                ids.put(symbol.qualifiedName(), key.longValue());
             }
+
+            @Override
+            public int getBatchSize() {
+                return insertable.size();
+            }
+        });
+
+        Map<String, Long> ids = new HashMap<>(insertable.size() * 2);
+        jdbc.query("SELECT id, qualified_name FROM `symbol` WHERE repo_id = ? ORDER BY id",
+                rs -> {
+                    ids.put(rs.getString("qualified_name"), rs.getLong("id"));
+                }, repoId);
+
+        List<CollectedSymbol> withParent = insertable.stream()
+                .filter(symbol -> symbol.parentQualifiedName() != null
+                        && ids.containsKey(symbol.parentQualifiedName()))
+                .toList();
+        if (!withParent.isEmpty()) {
+            // **按自然键定位到行本身**（仓库 + 文件 + 限定名 + 起始行），而不是 `WHERE id = ids.get(qualified_name)`：
+            // 限定名可能重复（同名符号是允许的，id 映射就是"后者覆盖前者"），用 id 映射定位会把两行都更到同一个 id 上，
+            // 另一行的 parent_id 永远留在 NULL —— 摘要页的"每个文件只算一次"依赖 parent_id IS NULL 判顶层类型，
+            // 于是文件被重复计数（这个 bug 是全量测试里的摘要用例抓出来的，不是单测）。
+            jdbc.batchUpdate("""
+                    UPDATE `symbol` SET parent_id = ?
+                     WHERE repo_id = ? AND file_id = ? AND qualified_name = ? AND start_line = ?
+                    """, new BatchPreparedStatementSetter() {
+                @Override
+                public void setValues(PreparedStatement ps, int i) throws SQLException {
+                    CollectedSymbol symbol = withParent.get(i);
+                    ps.setLong(1, ids.get(symbol.parentQualifiedName()));
+                    ps.setLong(2, repoId);
+                    ps.setLong(3, fileIds.get(symbol.filePath()));
+                    ps.setString(4, symbol.qualifiedName());
+                    ps.setInt(5, symbol.startLine());
+                }
+
+                @Override
+                public int getBatchSize() {
+                    return withParent.size();
+                }
+            });
         }
         return ids;
     }

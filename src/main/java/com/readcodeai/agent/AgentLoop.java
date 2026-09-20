@@ -78,12 +78,37 @@ public class AgentLoop {
     private final SupportChecker supportChecker;
     private final LlmClient llmClient;
 
+    /** 提示词里保留多少跳的**原始输出**；更早的压成一行事实（0 = 不压缩，旧行为）。 */
+    private final int keepFullObservations;
+
+    /** 压缩后的"一行事实"里最多列几个查到的符号/证据位置（测试会引用它们来断言"该留的都留了"）。 */
+    static final int COMPACT_KEEP_SUBJECTS = 12;
+    static final int COMPACT_KEEP_LOCATIONS = 5;
+
     public AgentLoop(ToolRegistry toolRegistry, EvidenceVerifier evidenceVerifier,
-                     SupportChecker supportChecker, LlmClient llmClient) {
+                     SupportChecker supportChecker, LlmClient llmClient, int keepFullObservations) {
         this.toolRegistry = toolRegistry;
         this.evidenceVerifier = evidenceVerifier;
         this.supportChecker = supportChecker;
         this.llmClient = llmClient;
+        this.keepFullObservations = Math.max(0, keepFullObservations);
+    }
+
+    /**
+     * 提示词里的一行：**真跳**（带结构化 step，可按需压缩）或系统说明（格式问题、绕圈提醒等，永远保留全文）。
+     *
+     * <p>为什么要把这两类分开：压缩只该针对"代码文本"，而系统说明本身就是一行字，压不出东西来。
+     * 早先它们混在一个 {@code List<String>} 里，想压缩就只能靠字符串前缀猜，那是碰运气。
+     */
+    private record PromptLine(String text, AgentStep step) {
+
+        static PromptLine note(String text) {
+            return new PromptLine(text, null);
+        }
+
+        static PromptLine hop(AgentStep step, String text) {
+            return new PromptLine(text, step);
+        }
     }
 
     /**
@@ -95,7 +120,8 @@ public class AgentLoop {
         long startNanos = System.nanoTime();
         ToolContext context = new ToolContext(repoId, repoRoot);
         List<AgentStep> steps = new ArrayList<>();
-        List<String> transcript = new ArrayList<>(seeds.lines());
+        List<PromptLine> transcript = new ArrayList<>();
+        seeds.lines().forEach(line -> transcript.add(PromptLine.note(line)));
         VisitedEdgeSet visited = new VisitedEdgeSet();
         // 轨迹状态：看到过的符号 vs 已经查过的符号。两者之差就是「还没走的路」——
         // 模型绕圈时把它算出来甩给模型，比只说一句"你重复了"有用得多（实测模型真的需要这一步）
@@ -139,8 +165,8 @@ public class AgentLoop {
                 if (formatRetries < MAX_FORMAT_RETRIES && budget.canContinue()) {
                     formatRetries++;
                     log.warn("模型输出不是合法 JSON，重发一次提示：{}", e.getMessage());
-                    transcript.add("[格式问题] 你上一条输出不是合法 JSON（" + e.getMessage()
-                            + "）。请**只**输出一个 JSON 对象，不要代码块、不要解释文字。");
+                    transcript.add(PromptLine.note("[格式问题] 你上一条输出不是合法 JSON（" + e.getMessage()
+                            + "）。请**只**输出一个 JSON 对象，不要代码块、不要解释文字。"));
                     continue;
                 }
                 stop = StopReason.FORMAT_ERROR;
@@ -151,9 +177,9 @@ public class AgentLoop {
             if (!turn.hasAction() && !turn.hasFinal()) {
                 if (formatRetries < MAX_FORMAT_RETRIES && budget.canContinue()) {
                     formatRetries++;
-                    transcript.add("[格式问题] 你的输出里既没有 tool 也没有 final。"
+                    transcript.add(PromptLine.note("[格式问题] 你的输出里既没有 tool 也没有 final。"
                             + "请输出 {\"thought\":\"...\",\"tool\":\"findCallers\",\"args\":{\"symbol\":\"...\"}}"
-                            + " 或 {\"thought\":\"...\",\"final\":{\"answer\":\"...\",\"evidence\":[...]}}");
+                            + " 或 {\"thought\":\"...\",\"final\":{\"answer\":\"...\",\"evidence\":[...]}}"));
                     continue;
                 }
                 stop = StopReason.FORMAT_ERROR;
@@ -184,7 +210,7 @@ public class AgentLoop {
                     consecutiveRepeats++;
                     String note = "这个查询已经做过了（" + VisitedEdgeSet.key(toolName, argsKey)
                             + "），结果就在上面的记录里，重复调用不会得到新信息。" + nextMoves(discovered, queried);
-                    transcript.add(note);
+                    transcript.add(PromptLine.note(note));
                     steps.add(new AgentStep(hop, turn.thought(), toolName, argsKey, note,
                             List.of(), List.of(), true, 0));
                     log.info("多跳第 {} 跳：重复调用被环检测拦下 —— {}", hop, argsKey);
@@ -202,10 +228,12 @@ public class AgentLoop {
                 ToolResult result = toolRegistry.execute(context, toolName, turn.toolArgs());
                 long toolMillis = (System.nanoTime() - toolStart) / 1_000_000;
                 String observation = clip(result.observation());
-                transcript.add("[第 " + hop + " 跳] " + toolName + "(" + argsKey + ") →\n" + observation);
+                AgentStep step = new AgentStep(hop, turn.thought(), toolName, argsKey, observation,
+                        result.evidence(), result.subjects(), false, toolMillis);
+                transcript.add(PromptLine.hop(step,
+                        "[第 " + hop + " 跳] " + toolName + "(" + argsKey + ") →\n" + observation));
                 result.subjects().forEach(subject -> discovered.add(VisitedEdgeSet.normalize(subject)));
-                steps.add(new AgentStep(hop, turn.thought(), toolName, argsKey, observation,
-                        result.evidence(), result.subjects(), false, toolMillis));
+                steps.add(step);
                 log.info("多跳第 {} 跳：{}({}) → {} 个结果（{} ms）",
                         hop, toolName, argsKey, result.subjects().size(), toolMillis);
                 continue;
@@ -255,8 +283,9 @@ public class AgentLoop {
             if (accepted.isEmpty()) {
                 if (corrections < MAX_VERIFICATION_CORRECTIONS && budget.canContinue()) {
                     corrections++;
-                    transcript.add("[核验失败] 你引用的证据没有通过磁盘核对：\n" + describeFailures(report)
-                            + "\n请用 readSymbol 把相关代码**重新读一遍**，再照抄原文与行号重发结论。");
+                    transcript.add(PromptLine.note("[核验失败] 你引用的证据没有通过磁盘核对：\n"
+                            + describeFailures(report)
+                            + "\n请用 readSymbol 把相关代码**重新读一遍**，再照抄原文与行号重发结论。"));
                     log.warn("多跳：模型证据全部未通过核验，退回重发一次");
                     continue;
                 }
@@ -392,12 +421,19 @@ public class AgentLoop {
                 """;
     }
 
-    private String userPrompt(String question, List<String> transcript, VisitedEdgeSet visited,
+    private String userPrompt(String question, List<PromptLine> transcript, VisitedEdgeSet visited,
                               BudgetGuard budget) {
         StringBuilder prompt = new StringBuilder("问题：").append(question).append("\n");
         if (!transcript.isEmpty()) {
             prompt.append("\n[已经查到的事实]（都是工具查出来的，可信）\n");
-            transcript.forEach(line -> prompt.append(line).append("\n"));
+            Set<Integer> compacted = hopsToCompact(transcript);
+            for (PromptLine line : transcript) {
+                if (line.step() != null && compacted.contains(line.step().hop())) {
+                    prompt.append(compact(line.step())).append("\n");
+                } else {
+                    prompt.append(line.text()).append("\n");
+                }
+            }
         }
         if (visited.size() > 0) {
             prompt.append("\n[已做过的查询，不要重复] ").append(String.join("、", visited.labels(12))).append("\n");
@@ -416,17 +452,80 @@ public class AgentLoop {
         return prompt.toString();
     }
 
-    /** 把「还没查过的路」算给模型看；一条不剩就明确让它收尾，并把证据格式摆到眼前。 */
+    /**
+     * 哪些轮次该压缩：**只保留最近 {@code keepFullObservations} 跳的原始输出**。
+     *
+     * <p>为什么值得压：每轮都要把整份记录重发一遍，而记录里绝大部分是旧轮次的代码文本 ——
+     * 实测单题 6k–15k token 就是这么来的，token 随轮数近似**平方**增长。
+     * 而模型拿旧轮次做什么用？知道"查到了哪些名字、下一步往哪走"。**名字与位置留下、代码文本丢掉**，
+     * 该有的信息一条不少（证据本身仍完整地留在轨迹里，grounding 与磁盘核验用的都是轨迹，不是提示词）。
+     *
+     * @return 该压缩的跳号；{@code keepFullObservations <= 0} 时返回空集 = 全部保留（旧行为）
+     */
+    private Set<Integer> hopsToCompact(List<PromptLine> transcript) {
+        if (keepFullObservations <= 0) {
+            return Set.of();
+        }
+        List<AgentStep> hopSteps = transcript.stream()
+                .map(PromptLine::step)
+                .filter(java.util.Objects::nonNull)
+                .toList();
+        Set<Integer> compacted = new LinkedHashSet<>();
+        for (int i = 0; i < hopSteps.size(); i++) {
+            if (hopSteps.size() - 1 - i >= keepFullObservations) {
+                compacted.add(hopSteps.get(i).hop());
+            }
+        }
+        return compacted;
+    }
+
+    /**
+     * 把一轮的原始输出压成**一行事实**：跳数、工具、参数、查到的名字、证据位置。
+     *
+     * <p>丢弃的是代码文本（它最长、也最容易让上下文爆掉），保留的是**可继续推理的骨架**。
+     * 末尾那句提示是必要的：模型会以为"上面没给的就是没有"，明说"要不要我重查"比让它猜强。
+     */
+    private static String compact(AgentStep step) {
+        StringBuilder line = new StringBuilder("[第 ").append(step.hop()).append(" 跳] ")
+                .append(step.tool()).append('(').append(step.args()).append(") → ");
+        if (step.subjects().isEmpty()) {
+            line.append("没有查到新的符号");
+        } else {
+            line.append(step.subjects().size()).append(" 个结果：")
+                    .append(step.subjects().stream().limit(COMPACT_KEEP_SUBJECTS)
+                            .collect(Collectors.joining("、")));
+            if (step.subjects().size() > COMPACT_KEEP_SUBJECTS) {
+                line.append(" 等");
+            }
+        }
+        if (!step.evidence().isEmpty()) {
+            line.append(" · 证据位置：")
+                    .append(step.evidence().stream().limit(COMPACT_KEEP_LOCATIONS)
+                            .map(AskEvidence::location).collect(Collectors.joining("、")));
+            if (step.evidence().size() > COMPACT_KEEP_LOCATIONS) {
+                line.append(" 等");
+            }
+        }
+        line.append("（这一跳的原始输出已略去以省上下文；需要细节可用同样的参数重新查一次）");
+        return line.toString();
+    }
+
+    /**
+     * 把「还没查过的路」算给模型看；一条不剩就明确让它收尾。
+     *
+     * <p>这里**不再重复附结论格式样例**：它在提示词的收尾段已经出现过，每轮再追加一遍纯属浪费
+     * （实测每轮多几百字符，而模型第一次就照抄下来了）。
+     */
     private static String nextMoves(Set<String> discovered, Set<String> queried) {
         List<String> options = discovered.stream()
                 .filter(symbol -> !queried.contains(symbol))
                 .limit(5)
                 .toList();
         if (options.isEmpty()) {
-            return "已经查到的分支都走过了 —— 现在直接给结论（final），不要再调用工具。" + CONCLUSION_EXAMPLE;
+            return "已经查到的分支都走过了 —— 现在直接给结论（final），不要再调用工具。";
         }
         return "还没查过的上游有：" + String.join("、", options)
-                + " —— 对其中一个继续 findCallers，或者直接给结论。" + CONCLUSION_EXAMPLE;
+                + " —— 对其中一个继续 findCallers，或者直接给结论。";
     }
 
     /**

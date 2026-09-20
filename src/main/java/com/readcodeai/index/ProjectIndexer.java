@@ -9,6 +9,7 @@ import com.readcodeai.index.store.IndexRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -37,11 +38,74 @@ public class ProjectIndexer {
     private final IndexRepository repository;
     private final ReadCodeAiProperties properties;
     private final RepoFetcher repoFetcher;
+    private final TransactionTemplate transactionTemplate;
 
-    public ProjectIndexer(IndexRepository repository, ReadCodeAiProperties properties, RepoFetcher repoFetcher) {
+    public ProjectIndexer(IndexRepository repository, ReadCodeAiProperties properties, RepoFetcher repoFetcher,
+                          TransactionTemplate transactionTemplate) {
         this.repository = repository;
         this.properties = properties;
         this.repoFetcher = repoFetcher;
+        this.transactionTemplate = transactionTemplate;
+    }
+
+    /**
+     * 落库阶段的结果：**事务里算好的东西一次带出来**。
+     *
+     * <p>为什么不用"往 lambda 外的数组里塞"那种写法：那样每加一个返回值就要多一个容器，
+     * 读代码的人得自己去数"这个数组第几个是什么"。一个 record 把进出讲清楚。
+     */
+    private record Stored(Map<String, Long> symbolIds, List<CollectedCall> edgeable, int orphan,
+                          long filesMs, long symbolsMs, long callsMs, long relationsMs, long chunksMs,
+                          long otherMs) {
+    }
+
+    /**
+     * 落库的**全部写入**（含标 READY），在调用方给的事务里执行。
+     *
+     * <p>顺序不能变：文件 → 符号 → 调用边 → 类型关系 → 代码块 —— 后三张表都要用前两张表的 id 映射。
+     */
+    private Stored storeIndex(long repoId, AnalyzeResult analyzed) {
+        long phaseStart = System.nanoTime();
+        Map<String, Long> fileIds = repository.insertSourceFiles(repoId, analyzed.files());
+        long filesMs = (System.nanoTime() - phaseStart) / 1_000_000;
+
+        phaseStart = System.nanoTime();
+        Map<String, Long> symbolIds = repository.insertSymbols(repoId, analyzed.symbols(), fileIds);
+        long symbolsMs = (System.nanoTime() - phaseStart) / 1_000_000;
+
+        phaseStart = System.nanoTime();
+        List<CollectedCall> edgeable = new ArrayList<>(analyzed.calls().size());
+        int orphan = 0;
+        for (CollectedCall call : analyzed.calls()) {
+            if (symbolIds.containsKey(call.callerSymbolKey())) {
+                edgeable.add(call);
+            } else {
+                // 调用者符号缺失说明「有调用、没有宿主方法」，这是分析器的问题，必须计数而不是静默丢弃
+                orphan++;
+            }
+        }
+        repository.insertCalls(repoId, edgeable, symbolIds);
+        long callsMs = (System.nanoTime() - phaseStart) / 1_000_000;
+
+        phaseStart = System.nanoTime();
+        repository.insertRelations(repoId, analyzed.relations(), symbolIds);
+        long relationsMs = (System.nanoTime() - phaseStart) / 1_000_000;
+
+        phaseStart = System.nanoTime();
+        repository.insertChunks(repoId, analyzed.chunks(), fileIds, symbolIds);
+        long chunksMs = (System.nanoTime() - phaseStart) / 1_000_000;
+
+        // 标 READY 放在同一个事务里：提交那一刻"数据 + 状态"一起生效，
+        // 不会出现"数据其实写完了、状态还停在 INDEXING"的中间态
+        phaseStart = System.nanoTime();
+        repository.finishRepo(repoId, analyzed.files().size(), (int) analyzed.parsedOkCount(),
+                analyzed.files().stream().mapToInt(FileOutcome::loc).sum(),
+                analyzed.symbols().size(), edgeable.size(),
+                (int) edgeable.stream().filter(CollectedCall::resolved).count());
+        long otherMs = (System.nanoTime() - phaseStart) / 1_000_000;
+
+        return new Stored(symbolIds, edgeable, orphan,
+                filesMs, symbolsMs, callsMs, relationsMs, chunksMs, otherMs);
     }
 
     /**
@@ -197,33 +261,26 @@ public class ProjectIndexer {
             log.info("源码根 {} 个，Java 文件 {} 个", sourceRoots.size(), javaFiles.size());
             listener.onProgress("PARSING", 0, javaFiles.size(), "解析 " + javaFiles.size() + " 个文件");
 
-            AnalyzeResult analyzed = new SourceAnalyzer(sourceRoots)
+            AnalyzeResult analyzed = new SourceAnalyzer(sourceRoots, properties.getIndex().getParseThreads())
                     .analyze(root, javaFiles, properties.getIndex().getMaxFileSizeKb(), listener);
 
             listener.onProgress("STORING", 0, 0, "写入索引（符号 / 调用图 / 检索单元）");
             long storeStart = System.nanoTime();
-            Map<String, Long> fileIds = repository.insertSourceFiles(repoId, analyzed.files());
-            Map<String, Long> symbolIds = repository.insertSymbols(repoId, analyzed.symbols(), fileIds);
-            List<CollectedCall> edgeable = new ArrayList<>(analyzed.calls().size());
-            int orphan = 0;
-            for (CollectedCall call : analyzed.calls()) {
-                if (symbolIds.containsKey(call.callerSymbolKey())) {
-                    edgeable.add(call);
-                } else {
-                    // 调用者符号缺失说明「有调用、没有宿主方法」，这是分析器的问题，必须计数而不是静默丢弃
-                    orphan++;
-                }
-            }
-            repository.insertCalls(repoId, edgeable, symbolIds);
-            repository.insertRelations(repoId, analyzed.relations(), symbolIds);
-            repository.insertChunks(repoId, analyzed.chunks(), fileIds, symbolIds);
+            // 落库整段**一个事务**，理由两条：
+            // ① 语义：要么整份索引都在，要么一条都不留 —— 早先崩在中间会留下半份数据，只靠 repo.status 兜着；
+            // ② 性能：实测落库占索引总耗时 70%，而其中大部分是"每条 INSERT 一次自动提交"（每条都是一次落盘）。
+            // 事务边界刻意不含进度回调（回调都在这个块之外）：进度写在另一个事务里才不会被压到提交后可见。
+            Stored stored = transactionTemplate.execute(status -> storeIndex(repoId, analyzed));
+            long storeMillis = (System.nanoTime() - storeStart) / 1_000_000;
+            List<CollectedCall> edgeable = stored.edgeable();
+            int orphan = stored.orphan();
+            log.info("落库分解：文件 {} ms · 符号 {} ms · 调用边 {} ms · 类型关系 {} ms · 代码块 {} ms"
+                            + " · 标 READY + 提交 {} ms（合计 {} ms）",
+                    stored.filesMs(), stored.symbolsMs(), stored.callsMs(), stored.relationsMs(),
+                    stored.chunksMs(), stored.otherMs(), storeMillis);
 
             int totalLoc = analyzed.files().stream().mapToInt(FileOutcome::loc).sum();
             int resolvedEdges = (int) edgeable.stream().filter(CollectedCall::resolved).count();
-            repository.finishRepo(repoId, analyzed.files().size(), (int) analyzed.parsedOkCount(), totalLoc,
-                    analyzed.symbols().size(), edgeable.size(), resolvedEdges);
-            long storeMillis = (System.nanoTime() - storeStart) / 1_000_000;
-
             IndexSummary summary = new IndexSummary(repoId, name, root.toString(), commitHash,
                     analyzed.files().size(), (int) analyzed.parsedOkCount(), totalLoc,
                     analyzed.symbols().size(), edgeable.size(), resolvedEdges, analyzed.chunks().size(), orphan,

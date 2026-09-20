@@ -262,7 +262,7 @@ class SupportCheckerTest {
                         caller.callLine(), null),
                 "{\"verdict\":\"unsupported\",\"reason\":\"引的是另一个方法的调用点\"}");
         AgentLoop loop = new AgentLoop(toolRegistry, evidenceVerifier,
-                new ModelSupportChecker(client, true), client);
+                new ModelSupportChecker(client, true), client, 2);
 
         var answer = loop.run(repo.id(), Path.of(repo.rootPath()),
                 "谁调用了 " + target.qualifiedName() + "？间接的也要。",

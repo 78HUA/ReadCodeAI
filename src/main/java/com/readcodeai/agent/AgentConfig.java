@@ -1,6 +1,7 @@
 package com.readcodeai.agent;
 
 import com.readcodeai.config.LlmClient;
+import com.readcodeai.config.ReadCodeAiProperties;
 import com.readcodeai.evidence.EvidenceVerifier;
 import com.readcodeai.evidence.SupportChecker;
 import org.springframework.context.annotation.Bean;
@@ -19,7 +20,9 @@ public class AgentConfig {
 
     @Bean
     AgentLoop agentLoop(ToolRegistry toolRegistry, EvidenceVerifier evidenceVerifier,
-                        SupportChecker supportChecker, LlmClient llmClient) {
-        return new AgentLoop(toolRegistry, evidenceVerifier, supportChecker, llmClient);
+                        SupportChecker supportChecker, LlmClient llmClient,
+                        ReadCodeAiProperties properties) {
+        return new AgentLoop(toolRegistry, evidenceVerifier, supportChecker, llmClient,
+                properties.getLlm().getKeepFullObservations());
     }
 }

@@ -50,6 +50,14 @@ public class ScriptedChatModel implements ChatModel {
         return prompts;
     }
 
+    /** 清空调用记录与脚本 —— 它在 Spring 上下文里是单例，测试之间必须重置（否则计数跨测试累计）。 */
+    public void reset() {
+        prompts.clear();
+        script = prompt -> text("（脚本未设置）");
+        promptTokens = 100;
+        completionTokens = 20;
+    }
+
     /** 被调用了几次。 */
     public int calls() {
         return prompts.size();

@@ -31,6 +31,9 @@ public class SpringAiLoopState {
 
     private static final Logger log = LoggerFactory.getLogger(SpringAiLoopState.class);
 
+    /** 单条观察的长度上限（与手写版同一个值：一次 readSymbol 的原文就够把预算吃光）。 */
+    static final int MAX_OBSERVATION_CHARS = 4000;
+
     private final ToolRegistry registry;
     private final ToolContext toolContext;
     private final BudgetGuard budget;
@@ -83,12 +86,26 @@ public class SpringAiLoopState {
 
     /** 观察 + **把"还剩几轮"告诉模型**（实测：不知道上限的模型会一路查到被掐断）。 */
     private String render(ToolResult result) {
-        String observation = result.observation() == null ? "" : result.observation();
+        String observation = clip(result.observation() == null ? "" : result.observation());
         int remaining = budget.remainingRounds();
         String hint = remaining <= 1
                 ? "\n\n（**这是最后一轮：请直接用 {\"final\":{...}} 给结论，不要再调工具**）"
                 : "\n\n（还能查 " + remaining + " 轮）";
         return observation + hint;
+    }
+
+    /**
+     * 单条观察的截断：**一次 readSymbol 就能把上下文预算吃光**（手写版同样的 4000 字上限）。
+     *
+     * <p>它和 {@link PromptCompactionAdvisor} 分工不同：这里管"**新查到的**这一条别太长"，
+     * 那里管"**旧的**别一轮轮累积"。
+     */
+    private static String clip(String observation) {
+        if (observation.length() <= MAX_OBSERVATION_CHARS) {
+            return observation;
+        }
+        return observation.substring(0, MAX_OBSERVATION_CHARS)
+                + "\n…（本条观察过长，已截断到 " + MAX_OBSERVATION_CHARS + " 字；需要更多就用工具按需再查）";
     }
 
     private static String describeArgs(Map<String, Object> args) {

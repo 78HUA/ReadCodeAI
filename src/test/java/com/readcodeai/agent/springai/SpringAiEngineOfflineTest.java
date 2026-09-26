@@ -60,6 +60,12 @@ class SpringAiEngineOfflineTest {
     @Autowired
     private ScriptedChatModel model;
 
+    /** 桩在 Spring 上下文里是单例：每条用例前重置，否则调用计数会跨用例累计。 */
+    @org.junit.jupiter.api.BeforeEach
+    void resetStub() {
+        model.reset();
+    }
+
     @Test
     void 默认引擎在离线假模型下也能跑完工具循环并把证据留住() {
         java.util.concurrent.atomic.AtomicInteger turn = new java.util.concurrent.atomic.AtomicInteger();
@@ -105,6 +111,43 @@ class SpringAiEngineOfflineTest {
         assertThat(answer.stopReason()).as("要能说出停在哪一维").isEqualTo(StopReason.BUDGET_ROUNDS);
         assertThat(answer.reason()).as("原因里要说清'没给出结论'").contains("没有给出结论");
         assertThat(answer.steps()).as("轨迹里查到的东西照样交出来").isNotEmpty();
+    }
+
+    /**
+     * P4：**A-B 压缩真的在起作用** —— 三跳 + 保留近两跳 ⇒ 恰好一条被压成一行事实，
+     * 而且压缩之后模型照样能收尾（循环没被 advisor 弄坏）。
+     */
+    @Test
+    void 更早的跳会被压成一行事实而近两跳保留原文() {
+        java.util.concurrent.atomic.AtomicInteger turn = new java.util.concurrent.atomic.AtomicInteger();
+        model.script(prompt -> {
+            int t = turn.incrementAndGet();
+            if (t <= 3) {
+                // 三个**不同**的查询：都真执行（参数不同，环检测不会拦）
+                return ScriptedChatModel.toolCall("textSearch", "{\"query\":\"class T" + t + "\"}");
+            }
+            Matcher location = LOCATION.matcher(textOf(prompt));
+            String file = null;
+            int line = 0;
+            while (location.find()) {
+                file = location.group(1);
+                line = Integer.parseInt(location.group(2));
+            }
+            assertThat(file).as("三跳之后提示词里应当仍带着位置信息").isNotNull();
+            return ScriptedChatModel.text(finalJson(file, line));
+        });
+
+        AgentAnswer answer = agentService.ask(queries.requireLatestRepoId(),
+                "AgentService.ask 的 question 参数是从哪里传进来的？", AgentMode.MULTI_HOP, null, null, false);
+
+        assertThat(answer.refused()).as("压缩之后照样能收尾：" + answer.reason()).isFalse();
+        assertThat(model.calls()).isEqualTo(4);          // 3 跳 + 1 次收尾
+
+        String lastPrompt = textOf(model.prompts().get(model.calls() - 1));
+        long compacted = lastPrompt.lines().filter(l -> l.contains("[已压缩]")).count();
+        assertThat(compacted)
+                .as("三跳 + 保留近两跳（readcodeai.llm.keep-full-observations=2）⇒ 恰好 1 条被压缩")
+                .isEqualTo(1);
     }
 
     /** 一条合法的结论 JSON：不写 snippet（只核验文件与行号）。 */

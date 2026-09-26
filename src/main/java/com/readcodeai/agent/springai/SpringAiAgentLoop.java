@@ -1,5 +1,7 @@
 package com.readcodeai.agent.springai;
 
+import com.readcodeai.agent.model.AgentSeeds;
+
 import com.readcodeai.agent.AgentEngine;
 import com.readcodeai.agent.AgentLoop;
 import com.readcodeai.agent.LlmUnavailableException;
@@ -15,6 +17,7 @@ import com.readcodeai.agent.model.SupportCheck;
 import com.readcodeai.agent.model.VerificationSummary;
 import com.readcodeai.agent.tools.ToolContext;
 import com.readcodeai.config.BudgetGuard;
+import com.readcodeai.config.ReadCodeAiProperties;
 import com.readcodeai.evidence.EvidenceVerifier;
 import com.readcodeai.evidence.SupportChecker;
 import org.slf4j.Logger;
@@ -86,15 +89,18 @@ public class SpringAiAgentLoop implements AgentEngine {
     private final ToolRegistry toolRegistry;
     private final EvidenceVerifier evidenceVerifier;
     private final SupportChecker supportChecker;
+    private final ReadCodeAiProperties properties;
 
     public SpringAiAgentLoop(ObjectProvider<ChatClient.Builder> chatClientBuilder,
                              ToolRegistry toolRegistry,
                              EvidenceVerifier evidenceVerifier,
-                             SupportChecker supportChecker) {
+                             SupportChecker supportChecker,
+                             ReadCodeAiProperties properties) {
         this.chatClientBuilder = chatClientBuilder;
         this.toolRegistry = toolRegistry;
         this.evidenceVerifier = evidenceVerifier;
         this.supportChecker = supportChecker;
+        this.properties = properties;
     }
 
     @Override
@@ -109,7 +115,7 @@ public class SpringAiAgentLoop implements AgentEngine {
     }
 
     @Override
-    public AgentAnswer run(long repoId, Path repoRoot, String question, AgentLoop.Seeds seeds,
+    public AgentAnswer run(long repoId, Path repoRoot, String question, AgentSeeds seeds,
                            BudgetGuard budget) {
         long startNanos = System.nanoTime();
         ChatClient.Builder builder = chatClientBuilder.getIfAvailable();
@@ -122,7 +128,11 @@ public class SpringAiAgentLoop implements AgentEngine {
         BudgetToolCallingManager manager = new BudgetToolCallingManager(budget, state);
         ChatClient client = builder
                 .defaultSystem(SYSTEM_PROMPT)
-                .defaultAdvisors(ToolCallingAdvisor.builder().toolCallingManager(manager).build())
+                .defaultAdvisors(
+                        ToolCallingAdvisor.builder().toolCallingManager(manager).build(),
+                        // A-B 压缩：更早那几跳的工具结果压成一行事实（近 N 跳留原文）。
+                        // 参数与手写版共用同一个配置项 —— 迁移时它一度成了死配置，这里接回来。
+                        new PromptCompactionAdvisor(properties.getLlm().getKeepFullObservations()))
                 .build();
 
         List<Message> history = new ArrayList<>();
@@ -284,7 +294,7 @@ public class SpringAiAgentLoop implements AgentEngine {
     }
 
     /** 引用是否有据可依：落在种子给的位置里，或落在本次轨迹查到的位置里。 */
-    private static boolean covered(AgentLoop.Seeds seeds, SpringAiLoopState state, AskEvidence evidence) {
+    private static boolean covered(AgentSeeds seeds, SpringAiLoopState state, AskEvidence evidence) {
         return coveredBy(seeds.evidence(), evidence) || coveredBy(state.trail(), evidence);
     }
 
@@ -300,7 +310,7 @@ public class SpringAiAgentLoop implements AgentEngine {
     }
 
     /** 用户提示词：问题 + 确定性路由给的种子（与手写版同一套口径）。 */
-    private static String userText(String question, AgentLoop.Seeds seeds) {
+    private static String userText(String question, AgentSeeds seeds) {
         StringBuilder sb = new StringBuilder("问题：").append(question).append('\n');
         if (!seeds.lines().isEmpty()) {
             sb.append('\n');

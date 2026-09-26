@@ -1,5 +1,7 @@
 package com.readcodeai.agent;
 
+import com.readcodeai.agent.model.AgentSeeds;
+
 import com.readcodeai.agent.cache.AnswerCache;
 import com.readcodeai.agent.log.AnswerLogService;
 import com.readcodeai.agent.log.AnswerLogSource;
@@ -262,9 +264,9 @@ public class AgentService {
      * <p>这不是提示词工程，而是分工：符号解析是确定性的活（能算准），
      * 让模型从算准的位置起步，既省一轮预算，也避免它去猜"问题里说的是哪个同名方法"。
      */
-    private static AgentLoop.Seeds seedObservations(QueryRouter.Routed routed) {
+    private static AgentSeeds seedObservations(QueryRouter.Routed routed) {
         if (routed.targets().isEmpty()) {
-            return AgentLoop.Seeds.none();
+            return AgentSeeds.none();
         }
         List<String> seeds = new ArrayList<>();
         StringBuilder seed = new StringBuilder("[第 0 跳 · 系统] 确定性路由已把问题里的符号解析出来，可以直接对它用工具：\n");
@@ -277,6 +279,6 @@ public class AgentService {
                 .map(target -> new com.readcodeai.agent.model.AskEvidence(target.filePath(),
                         target.startLine(), target.endLine(), "", "确定性路由解析出的符号"))
                 .toList();
-        return AgentLoop.Seeds.of(seeds, locations);
+        return AgentSeeds.of(seeds, locations);
     }
 }

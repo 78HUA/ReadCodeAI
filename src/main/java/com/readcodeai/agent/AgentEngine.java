@@ -1,6 +1,7 @@
 package com.readcodeai.agent;
 
 import com.readcodeai.agent.model.AgentAnswer;
+import com.readcodeai.agent.model.AgentSeeds;
 import com.readcodeai.config.BudgetGuard;
 
 import java.nio.file.Path;
@@ -19,7 +20,7 @@ public interface AgentEngine {
     /**
      * @param seeds 确定性路由已经算准的起点（第 0 跳）；它同时决定"哪些引用算有据可依"
      */
-    AgentAnswer run(long repoId, Path repoRoot, String question, AgentLoop.Seeds seeds, BudgetGuard budget);
+    AgentAnswer run(long repoId, Path repoRoot, String question, AgentSeeds seeds, BudgetGuard budget);
 
     /**
      * 这个引擎当前能不能用。

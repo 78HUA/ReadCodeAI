@@ -1,5 +1,7 @@
 package com.readcodeai.evidence;
 
+import com.readcodeai.agent.model.AgentSeeds;
+
 import com.readcodeai.agent.AnswerService;
 import com.readcodeai.agent.AgentLoop;
 import com.readcodeai.agent.ScriptedLlmClient;
@@ -266,7 +268,7 @@ class SupportCheckerTest {
 
         var answer = loop.run(repo.id(), Path.of(repo.rootPath()),
                 "谁调用了 " + target.qualifiedName() + "？间接的也要。",
-                AgentLoop.Seeds.none(), new BudgetGuard(8, 60_000, 1_000_000, 100, 0, 0));
+                AgentSeeds.none(), new BudgetGuard(8, 60_000, 1_000_000, 100, 0, 0));
 
         assertThat(answer.refused()).isTrue();
         assertThat(answer.stopReason()).isEqualTo(StopReason.SUPPORT_REJECTED);

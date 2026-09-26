@@ -2,6 +2,7 @@ package com.readcodeai.agent;
 
 import com.readcodeai.agent.model.AgentAnswer;
 import com.readcodeai.agent.model.AgentMode;
+import com.readcodeai.agent.model.AgentSeeds;
 import com.readcodeai.agent.model.AgentStep;
 import com.readcodeai.agent.model.AnsweredBy;
 import com.readcodeai.agent.model.AskEvidence;
@@ -127,7 +128,7 @@ public class AgentLoop implements AgentEngine {
     }
 
     @Override
-    public AgentAnswer run(long repoId, Path repoRoot, String question, Seeds seeds,
+    public AgentAnswer run(long repoId, Path repoRoot, String question, AgentSeeds seeds,
                            BudgetGuard budget) {
         long startNanos = System.nanoTime();
         ToolContext context = new ToolContext(repoId, repoRoot);
@@ -385,18 +386,9 @@ public class AgentLoop implements AgentEngine {
      *
      * <p>后者是用来判"引用有没有依据"的：种子把目标符号的定义行交到模型手上，
      * 那它引用这个定义就是有据可依 —— 不把这部分算进去，会把合法引用误杀。
+     *
+     * <p>（已提到 {@link AgentSeeds}：两个引擎共用同一个契约。）
      */
-    public record Seeds(List<String> lines, List<AskEvidence> evidence) {
-
-        public static Seeds none() {
-            return new Seeds(List.of(), List.of());
-        }
-
-        public static Seeds of(List<String> lines, List<AskEvidence> evidence) {
-            return new Seeds(lines, evidence);
-        }
-    }
-
     private static List<AskEvidence> trailEvidence(List<AgentStep> steps) {
         List<AskEvidence> all = new ArrayList<>();
         for (AgentStep step : steps) {

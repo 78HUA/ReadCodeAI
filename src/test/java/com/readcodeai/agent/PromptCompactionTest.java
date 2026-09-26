@@ -1,5 +1,7 @@
 package com.readcodeai.agent;
 
+import com.readcodeai.agent.model.AgentSeeds;
+
 import com.readcodeai.agent.model.AgentAnswer;
 import com.readcodeai.agent.model.AgentStep;
 import com.readcodeai.config.BudgetGuard;
@@ -153,7 +155,7 @@ class PromptCompactionTest {
         AgentLoop loop = new AgentLoop(toolRegistry, evidenceVerifier, TestCheckers.NONE, client, keep);
 
         AgentAnswer answer = loop.run(repo.id(), Path.of(repo.rootPath()),
-                "谁调用了这几个方法？间接的也要。", AgentLoop.Seeds.none(),
+                "谁调用了这几个方法？间接的也要。", AgentSeeds.none(),
                 new BudgetGuard(8, 60_000, 1_000_000, 100, 0, 0));
         return new Run(answer, client);
     }

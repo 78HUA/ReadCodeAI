@@ -18,6 +18,7 @@ import com.readcodeai.retrieve.model.RepoView;
 import com.readcodeai.retrieve.model.SymbolView;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.nio.file.Path;
@@ -51,6 +52,10 @@ public class AgentService {
 
     private final AnswerService answerService;
     private final AgentLoop agentLoop;
+    /** Spring AI 版多跳引擎：只有 `readcodeai.agent.engine=spring-ai` 时才会被装配，所以用 Provider 懒取。 */
+    private final ObjectProvider<com.readcodeai.agent.springai.SpringAiAgentLoop> springAiEngine;
+    /** 非 null 时强制使用该引擎（给直接 new 的测试：它们注入的是手写客户端，必须配手写引擎）。 */
+    private final ReadCodeAiProperties.Agent.Engine engineOverride;
     private final QueryRouter queryRouter;
     private final SymbolQueryService symbolQueryService;
     private final LlmClient llmClient;
@@ -59,10 +64,37 @@ public class AgentService {
     private final AnswerLogService answerLogService;
     private final SummaryAnswerer summaryAnswerer;
 
+    /**
+     * 兼容构造器：**给直接 new 的测试用**，固定走手写引擎 —— 它们注入的是
+     * {@code ScriptedLlmClient}（实现 {@code LlmClient}），配 Spring AI 引擎是配不上的。
+     *
+     * <p>这样这次引入 Spring AI 的改动对既有测试是"零改动"的。
+     */
     public AgentService(AnswerService answerService, AgentLoop agentLoop, QueryRouter queryRouter,
                         SymbolQueryService symbolQueryService, LlmClient llmClient,
                         AnswerCache answerCache, ReadCodeAiProperties properties,
                         AnswerLogService answerLogService, SummaryAnswerer summaryAnswerer) {
+        this(answerService, agentLoop, queryRouter, symbolQueryService, llmClient, answerCache, properties,
+                answerLogService, summaryAnswerer, null, ReadCodeAiProperties.Agent.Engine.HANDWRITTEN);
+    }
+
+    /** Spring 用的构造器：引擎由配置决定（{@code readcodeai.agent.engine}）。 */
+    @org.springframework.beans.factory.annotation.Autowired
+    public AgentService(AnswerService answerService, AgentLoop agentLoop, QueryRouter queryRouter,
+                        SymbolQueryService symbolQueryService, LlmClient llmClient,
+                        AnswerCache answerCache, ReadCodeAiProperties properties,
+                        AnswerLogService answerLogService, SummaryAnswerer summaryAnswerer,
+                        ObjectProvider<com.readcodeai.agent.springai.SpringAiAgentLoop> springAiEngine) {
+        this(answerService, agentLoop, queryRouter, symbolQueryService, llmClient, answerCache, properties,
+                answerLogService, summaryAnswerer, springAiEngine, null);
+    }
+
+    private AgentService(AnswerService answerService, AgentLoop agentLoop, QueryRouter queryRouter,
+                         SymbolQueryService symbolQueryService, LlmClient llmClient,
+                         AnswerCache answerCache, ReadCodeAiProperties properties,
+                         AnswerLogService answerLogService, SummaryAnswerer summaryAnswerer,
+                         ObjectProvider<com.readcodeai.agent.springai.SpringAiAgentLoop> springAiEngine,
+                         ReadCodeAiProperties.Agent.Engine engineOverride) {
         this.answerService = answerService;
         this.agentLoop = agentLoop;
         this.queryRouter = queryRouter;
@@ -72,6 +104,37 @@ public class AgentService {
         this.properties = properties;
         this.answerLogService = answerLogService;
         this.summaryAnswerer = summaryAnswerer;
+        this.springAiEngine = springAiEngine;
+        this.engineOverride = engineOverride;
+    }
+
+    /**
+     * 生效的引擎：测试可以强制（{@link #engineOverride}），否则按配置
+     * （{@code readcodeai.agent.engine}）。
+     */
+    private ReadCodeAiProperties.Agent.Engine effectiveEngine() {
+        return engineOverride != null ? engineOverride : properties.getAgent().getEngine();
+    }
+
+    /**
+     * 选哪个多跳引擎。
+     *
+     * <p>两个引擎实现同一个 {@link AgentEngine}，返回同一种 {@link AgentAnswer} ——
+     * 所以下游（核验 / 缓存 / 记账 / 界面）一行都不用改。
+     */
+    private AgentEngine engine() {
+        if (effectiveEngine() != ReadCodeAiProperties.Agent.Engine.SPRING_AI) {
+            return agentLoop;
+        }
+        return springAiEngine.getObject();
+    }
+
+    /**
+     * 实际生效的引擎名 —— **它要进答案缓存的键**：
+     * 两个引擎可以共存，不带这一维就会"用 A 引擎问过、换 B 引擎拿到 A 的答案"。
+     */
+    private String resolvedEngine() {
+        return effectiveEngine().value();
     }
 
     public AgentAnswer ask(Long repoId, String question, AgentMode mode, String scopePath, Integer topK) {
@@ -138,12 +201,12 @@ public class AgentService {
             return converted;
         }
 
-        if (!llmClient.available()) {
-            throw new LlmUnavailableException("未配置 LLM（readcodeai.llm.*），多跳检索不可用；"
-                    + "定位 / 调用关系 / 实现类 / 全文检索等确定性能力不受影响");
+        AgentEngine engine = engine();
+        if (!engine.available()) {
+            throw new LlmUnavailableException(engine.unavailableReason());
         }
         // scopePath / topK 是多跳里用不上的旋钮：检索范围由模型自己决定，手动限定反而会把它框死
-        AgentAnswer answer = agentLoop.run(effectiveRepoId, repoRoot, question, seedObservations(routed),
+        AgentAnswer answer = engine.run(effectiveRepoId, repoRoot, question, seedObservations(routed),
                 deep ? BudgetGuard.deepOf(properties) : BudgetGuard.of(properties));
         putIfCacheable(effectiveRepoId, repo, question, effectiveMode, answer);
         answerLogService.recordAgent(effectiveRepoId, AnswerLogSource.USER, question, "MULTI_HOP",
@@ -168,7 +231,7 @@ public class AgentService {
         }
         String indexedAt = repo.indexedAt() == null ? null : repo.indexedAt().toString();
         try {
-            answerCache.put(repoId, indexedAt, question, mode.name(), llmClient.model(), answer);
+            answerCache.put(repoId, indexedAt, question, mode.name(), llmClient.model(), resolvedEngine(), answer);
         } catch (RuntimeException e) {
             // 缓存写失败只该表现为"下次还得重算"，绝不能影响这次回答
             log.warn("写答案缓存失败（不影响本次回答）：{}", e.toString());
@@ -184,7 +247,7 @@ public class AgentService {
     private AgentAnswer readCache(long repoId, String indexedAt, String question, AgentMode mode) {
         try {
             // 命中就统一标成"来自缓存"（缓存实现只管存取，不负责这件事）
-            return answerCache.get(repoId, indexedAt, question, mode.name(), llmClient.model())
+            return answerCache.get(repoId, indexedAt, question, mode.name(), llmClient.model(), resolvedEngine())
                     .map(AgentAnswer::asCached)
                     .orElse(null);
         } catch (RuntimeException e) {

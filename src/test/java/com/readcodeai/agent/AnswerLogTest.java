@@ -311,14 +311,15 @@ class AnswerLogTest {
         private final Map<String, AgentAnswer> store = new HashMap<>();
 
         @Override
-        public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode, String model) {
-            return Optional.ofNullable(store.get(key(repoId, question, mode, model)));
+        public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode, String model,
+                                         String engine) {
+            return Optional.ofNullable(store.get(key(repoId, question, mode, model, engine)));
         }
 
         @Override
-        public void put(long repoId, String indexedAt, String question, String mode, String model,
+        public void put(long repoId, String indexedAt, String question, String mode, String model, String engine,
                         AgentAnswer answer) {
-            store.put(key(repoId, question, mode, model), answer);
+            store.put(key(repoId, question, mode, model, engine), answer);
         }
 
         @Override
@@ -326,8 +327,8 @@ class AnswerLogTest {
             return "内存缓存（测试用）";
         }
 
-        private static String key(long repoId, String question, String mode, String model) {
-            return repoId + "|" + question + "|" + mode + "|" + model;
+        private static String key(long repoId, String question, String mode, String model, String engine) {
+            return repoId + "|" + question + "|" + mode + "|" + model + "|" + engine;
         }
     }
 }

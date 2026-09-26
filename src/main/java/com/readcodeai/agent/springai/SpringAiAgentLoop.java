@@ -155,6 +155,14 @@ public class SpringAiAgentLoop implements AgentEngine {
                 return refused(state, reason, manager.stopDetail(), budget, startNanos, null);
             }
 
+            // 记账：框架只在**有工具调用**的那一轮走 ToolCallingManager（记账在它那里）。
+            // 结论轮与"格式/核验不过"的重发轮没有工具调用，那几轮的轮次与 token 要在这里补上 ——
+            // 少记会让轮次、token 用量、成本三个数字都比实际小（运行统计与预算依据都会偏乐观，
+            // 而且与手写版口径不一致：手写版每一轮模型调用都记账）。
+            if (!hasToolCalls(response)) {
+                recordTextRound(budget, response);
+            }
+
             String content = text(response);
             log.info("[SpringAI] 模型输出（{} 字）：{}", content == null ? 0 : content.length(), clip(content, 600));
 
@@ -282,6 +290,10 @@ public class SpringAiAgentLoop implements AgentEngine {
 
     /** 预算停在哪一维 → 对应的 StopReason（与手写版同一套映射）。 */
     private static StopReason budgetStopReason(BudgetGuard budget, BudgetToolCallingManager manager) {
+        if (manager.noProgress()) {
+            // 绕圈优先于额度：先说清"它在原地打转"，别把原因报成"额度不够"
+            return StopReason.NO_PROGRESS;
+        }
         if (manager.lastRoundStillCallingTools()) {
             return StopReason.BUDGET_ROUNDS;
         }
@@ -291,6 +303,24 @@ public class SpringAiAgentLoop implements AgentEngine {
             case TOKENS -> StopReason.BUDGET_TOKENS;
             case COST -> StopReason.BUDGET_COST;
         };
+    }
+
+    /** 这一轮模型有没有点名工具（决定它走不走框架的工具循环执行器 → 谁负责记账）。 */
+    private static boolean hasToolCalls(ChatResponse response) {
+        if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
+            return false;
+        }
+        var calls = response.getResult().getOutput().getToolCalls();
+        return calls != null && !calls.isEmpty();
+    }
+
+    /** 没有工具调用的那一轮（结论 / 重发）自己在引擎侧记账 —— 用量缺失按 0 计，不因此崩。 */
+    private static void recordTextRound(BudgetGuard budget, ChatResponse response) {
+        var usage = response == null || response.getMetadata() == null
+                ? null : response.getMetadata().getUsage();
+        int in = usage == null || usage.getPromptTokens() == null ? 0 : usage.getPromptTokens();
+        int out = usage == null || usage.getCompletionTokens() == null ? 0 : usage.getCompletionTokens();
+        budget.recordLlmCall(in, out);
     }
 
     /** 引用是否有据可依：落在种子给的位置里，或落在本次轨迹查到的位置里。 */

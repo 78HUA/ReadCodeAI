@@ -34,6 +34,9 @@ public class SpringAiLoopState {
     /** 单条观察的长度上限（与手写版同一个值：一次 readSymbol 的原文就够把预算吃光）。 */
     static final int MAX_OBSERVATION_CHARS = 4000;
 
+    /** 连续重复几次判为绕圈并主动终止 —— 与手写版同一个值、同一条规则。 */
+    static final int MAX_CONSECUTIVE_REPEATS = 3;
+
     private final ToolRegistry registry;
     private final ToolContext toolContext;
     private final BudgetGuard budget;
@@ -48,6 +51,8 @@ public class SpringAiLoopState {
     private volatile String lastAssistantText = "";
     private int hop;
     private int repeatedCalls;
+    /** 连续重复的次数：连续到上限就判绕圈（一次成功的查询会把它清零）。 */
+    private int consecutiveRepeats;
 
     public SpringAiLoopState(ToolRegistry registry, ToolContext toolContext, BudgetGuard budget) {
         this.registry = registry;
@@ -61,20 +66,27 @@ public class SpringAiLoopState {
     public String invoke(String toolName, Map<String, Object> args) {
         String argsKey = args.values().stream().map(String::valueOf).reduce("", (a, b) -> a + b);
         boolean firstVisit = visited.firstVisit(toolName, argsKey);
+        hop++;
         if (!firstVisit) {
+            consecutiveRepeats++;
             repeatedCalls++;
             budget.recordToolCall(true);
-            log.info("[SpringAI] 重复调用被拒：{}({})", toolName, argsKey);
-            return "这个查询已经做过了（" + toolName + " " + argsKey + "），结果和上次一样。"
+            String note = "这个查询已经做过了（" + toolName + " " + argsKey + "），结果和上次一样。"
                     + "换个方向查，或者用现有材料给结论。";
+            // 被拦下的这一跳**也要进轨迹**：界面与报告要能看出"模型在这里被挡了一次"，
+            // 否则只看到它忽然换了方向，说不清中间发生过什么（与手写版同一条口径）。
+            steps.add(new AgentStep(hop, lastAssistantText, toolName, describeArgs(args), note,
+                    List.of(), List.of(), true, 0));
+            log.info("[SpringAI] 第 {} 跳：重复调用被环检测拦下 —— {}({})", hop, toolName, argsKey);
+            return note;
         }
+        consecutiveRepeats = 0;
         budget.recordToolCall(false);
 
         long t0 = System.nanoTime();
         ToolResult result = registry.execute(toolContext, toolName, args);
         long ms = (System.nanoTime() - t0) / 1_000_000;
 
-        hop++;
         trail.addAll(result.evidence());
         steps.add(new AgentStep(hop, lastAssistantText, toolName, describeArgs(args),
                 result.observation(), result.evidence(), result.subjects(), false, ms));
@@ -134,5 +146,10 @@ public class SpringAiLoopState {
 
     public int repeatedCalls() {
         return repeatedCalls;
+    }
+
+    /** 连续重复次数（达到 {@link #MAX_CONSECUTIVE_REPEATS} 即判绕圈，由预算管理器终止循环）。 */
+    public int consecutiveRepeats() {
+        return consecutiveRepeats;
     }
 }

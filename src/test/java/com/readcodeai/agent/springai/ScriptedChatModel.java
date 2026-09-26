@@ -13,6 +13,7 @@ import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 /**
@@ -38,6 +39,23 @@ public class ScriptedChatModel implements ChatModel {
     public ScriptedChatModel script(Function<Prompt, ChatResponse> script) {
         this.script = script;
         return this;
+    }
+
+    /**
+     * 按次序念台词：第 n 次调用返回第 n 条 —— 手写测试里 {@code ScriptedLlmClient.lines(...)} 的对应物，
+     * 搬那批"机制用例"时口径能逐条对上。
+     *
+     * <p>说完之后返回一句**明确的非 JSON 提示**（而不是重复最后一条或抛异常）：脚本不够长时，
+     * 被测代码会走到"格式错误"分支，断言失败时能一眼看出是脚本用完了。
+     */
+    public ScriptedChatModel scriptLines(ChatResponse... lines) {
+        AtomicInteger turn = new AtomicInteger();
+        return script(prompt -> {
+            int i = turn.getAndIncrement();
+            return i < lines.length
+                    ? lines[i]
+                    : text("（脚本已用完：第 " + (i + 1) + " 次调用没有台词）");
+        });
     }
 
     public ScriptedChatModel withTokenUsage(int promptTokens, int completionTokens) {

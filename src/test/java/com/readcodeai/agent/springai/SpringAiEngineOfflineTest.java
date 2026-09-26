@@ -7,24 +7,11 @@ import com.readcodeai.agent.model.AskEvidence;
 import com.readcodeai.agent.model.StopReason;
 import com.readcodeai.retrieve.SymbolQueryService;
 import org.junit.jupiter.api.Test;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.metadata.ChatResponseMetadata;
-import org.springframework.ai.chat.metadata.DefaultUsage;
-import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.model.Generation;
-import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
-import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Primary;
+import org.springframework.context.annotation.Import;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -46,6 +33,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * </ol>
  */
 @SpringBootTest
+@Import(StubModelConfig.class)
 class SpringAiEngineOfflineTest {
 
     /** 提示词或工具结果里的第一个「文件:行号」——脚本拿它当结论的证据（真实位置，核验才过得去）。 */
@@ -100,7 +88,11 @@ class SpringAiEngineOfflineTest {
 
     @Test
     void 额度用尽时框架循环会被中断并说得出原因() {
-        model.script(prompt -> ScriptedChatModel.toolCall("findCallers", "{\"symbol\":\"AgentService.ask\"}"));
+        // 每一轮换一个参数：**不能重复同一个调用** —— 重复会被环检测拦下，连续三次就按"绕圈"终止，
+        // 那就测成 NO_PROGRESS 了（两条停止原因各有各的用例，别混着测）。
+        java.util.concurrent.atomic.AtomicInteger turn = new java.util.concurrent.atomic.AtomicInteger();
+        model.script(prompt -> ScriptedChatModel.toolCall("textSearch",
+                "{\"query\":\"class T" + turn.incrementAndGet() + "\"}"));
 
         long repoId = queries.requireLatestRepoId();
         // 必须用**链式问法**：确定性问题（"谁调用了 X"）根本不会走到引擎（能算准的别猜）
@@ -174,15 +166,5 @@ class SpringAiEngineOfflineTest {
 
     // ------------------------------------------------------------------ 测试替身
 
-    /** 假模型桩已抽成共享类 {@link ScriptedChatModel}（客户端与引擎的离线测试共用）。 */
-    @TestConfiguration
-    static class StubModelConfig {
-
-        /** @Primary：让 ChatClient 用这个桩，而不是自动配置里那个真模型。 */
-        @Bean
-        @Primary
-        ScriptedChatModel scriptedChatModel() {
-            return new ScriptedChatModel();
-        }
-    }
+    /** 假模型桩的装配在共享的 {@link StubModelConfig} 里（默认引擎的多个离线用例共用同一套）。 */
 }

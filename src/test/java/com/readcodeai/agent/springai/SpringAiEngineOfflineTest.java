@@ -131,56 +131,7 @@ class SpringAiEngineOfflineTest {
 
     // ------------------------------------------------------------------ 测试替身
 
-    /**
-     * 脚本化假模型（Spring AI 版）：**按提示词内容决定这一轮返回什么**。
-     *
-     * <p>它是手写测试里 {@code ScriptedLlmClient} 的对应物，思路完全一样：
-     * 机制用假模型测（毫秒级、可断言每个分支），效果才用真模型只报数字。
-     *
-     * <p>两个坑（都在 spike 里踩过，这里已避开）：假模型必须让 {@code getOptions()}
-     * 返回 <b>支持工具调用的 options</b>，否则框架判定"这轮不该执行工具"，循环会**静默不跑**；
-     * 另外它得是 {@code @Primary}，否则与自动配置的真模型 Bean 冲突。
-     */
-    static class ScriptedChatModel implements ChatModel {
-
-        private java.util.function.Function<Prompt, ChatResponse> script = prompt -> text("（脚本未设置）");
-
-        void script(java.util.function.Function<Prompt, ChatResponse> script) {
-            this.script = script;
-        }
-
-        @Override
-        public ChatResponse call(Prompt prompt) {
-            ChatResponse raw = script.apply(prompt);
-            return ChatResponse.builder()
-                    .generations(raw.getResults())
-                    .metadata(ChatResponseMetadata.builder()
-                            .usage(new DefaultUsage(100, 20))
-                            .build())
-                    .build();
-        }
-
-        @Override
-        public ChatOptions getOptions() {
-            return ToolCallingChatOptions.builder().build();
-        }
-
-        /** "我要调用一个工具"。 */
-        static ChatResponse toolCall(String toolName, String jsonArgs) {
-            AssistantMessage message = AssistantMessage.builder()
-                    .content("")
-                    .toolCalls(List.of(new AssistantMessage.ToolCall(
-                            "call-" + UUID.randomUUID(), "function", toolName, jsonArgs)))
-                    .build();
-            return new ChatResponse(new ArrayList<>(List.of(new Generation(message))));
-        }
-
-        /** "这是我的结论"。 */
-        static ChatResponse text(String content) {
-            return new ChatResponse(new ArrayList<>(List.of(new Generation(new AssistantMessage(content)))));
-        }
-    }
-
+    /** 假模型桩已抽成共享类 {@link ScriptedChatModel}（客户端与引擎的离线测试共用）。 */
     @TestConfiguration
     static class StubModelConfig {
 

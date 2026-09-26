@@ -32,6 +32,9 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 @SpringBootTest
 class ToolsTest {
 
+    /** 只为一个用途：那条偶发红的断言留下现场（见 textSearchFindsCodeByKeywordAndEvidenceVerifies）。 */
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ToolsTest.class);
+
     @Autowired
     private ToolRegistry toolRegistry;
 
@@ -139,8 +142,20 @@ class ToolsTest {
 
         assertThat(result.found()).as("拿一个真实存在的方法名去搜，应当命中").isTrue();
         assertThat(result.observation()).contains("命中");
-        assertThat(verify(repo, result).failed())
-                .as("全文检索的证据也要过磁盘核验（索引过期就该判失败）").isZero();
+        EvidenceVerifier.Report report = verify(repo, result);
+        if (report.failed() > 0) {
+            // 这条断言偶发红过一次（顺序相关）而当时没留下现场。把"搜的是谁、哪几条对不上、为什么"打全 ——
+            // 下次一冒头就能直接定位，不用再靠复现碰运气。
+            log.warn("全文检索证据核验未过：target={}（{}）· 仓库={} · 失败分布={} · 未通过明细={}",
+                    target.name(), target.location(), repo.rootPath(), report.failureCounts(),
+                    report.evidence().stream().filter(e -> !e.passed())
+                            .map(e -> e.evidence().location() + " " + e.failureKind() + " " + e.detail())
+                            .toList());
+        }
+        assertThat(report.failed())
+                .as("全文检索的证据也要过磁盘核验（索引过期就该判失败）；target=%s；失败分布=%s",
+                        target.location(), report.failureCounts())
+                .isZero();
     }
 
     private EvidenceVerifier.Report verify(RepoView repo, ToolResult result) {

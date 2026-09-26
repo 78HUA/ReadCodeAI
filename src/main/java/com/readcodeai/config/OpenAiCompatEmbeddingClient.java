@@ -13,8 +13,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * OpenAI 兼容协议的向量化客户端（/embeddings），与 {@link OpenAiCompatClient} 是兄弟关系：
- * 同一个供应商、同一把 Key、同一个手写 HTTP 的思路 —— **不引 AI SDK**。
+ * OpenAI 兼容协议的向量化客户端（/embeddings）：手写 HTTP，**不引 AI SDK**。
+ *
+ * <p>为什么对话那条线已经换成 Spring AI（见 {@link SpringAiLlmClient}），这条还留着手写：
+ * 向量只服务**评估基线**与状态页、没接入问答路由（换过去收益太小），换不换都不影响主链路。
  *
  * <p>请求/响应形状是 2026-09-20 用 curl 实测钉住的（见 verification-log）：
  * 请求 {@code {"model","dimensions","input":[...]}}，批量可用；

@@ -141,7 +141,13 @@ class RepoSummaryTest {
     @Test
     void unverifiedSymbolNamesInModelNotesAreFlagged() {
         RepoView repo = corpus();
-        SymbolView known = repository.mostCalledMethods(repo.id(), 1).get(0);
+        // 取一个**提取器认得出**的名字：标识符规则是 `[A-Za-z_$][A-Za-z0-9_$]{2,}`（≥3 个字符），
+        // 而"被调用最多的方法"完全可能是 `ok` 这种两字母短名（CI 用项目自己当语料时就撞上了）——
+        // 命名规则决定了它不会被提取出来，用例不该栽在这上面。
+        SymbolView known = repository.mostCalledMethods(repo.id(), 20).stream()
+                .filter(symbol -> symbol.name().length() >= 3)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("语料里找不到名字足够长的被调方法"));
 
         // 一句话里混进一个真符号名与一个编造的符号名 —— 只有真的那个该通过核对
         List<ModuleNote> notes = semanticSummarizer.verify(repo.id(), List.of(

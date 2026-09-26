@@ -2239,4 +2239,19 @@ Spring AI 侧原先只统计"有工具调用的轮次"（3.67 = 跳数），手�
 根因是 Builder **可变**、而容器里那个 `ChatClient.Builder` 是 **prototype** 作用域（每取一次是新的，所以生产路径没事）。
 测试替身必须如实模拟这个语义 —— 每次 `getIfAvailable()` 返回新 Builder。
 
+**CI 抓到一条用例的数据假设（已修）**：CI 的语料是**项目自己**（`-Dreadcodeai.verify.repo=.`，
+见 `.github/workflows/test.yml`），而 `RepoSummaryTest.unverifiedSymbolNamesInModelNotesAreFlagged`
+取的是"被调用最多的那个方法"当已知符号 —— 删掉 `AgentLoop`（本项目的文件）之后，第一名变成了
+`ApiResponse.ok`（`ok` 两字母），而符号提取的规则是 `[A-Za-z_$][A-Za-z0-9_$]{2,}`（**≥3 个字符**），
+两字母的名字根本不会被提取 → 断言失败。
+已改成在**前 20 名里挑第一个"名字 ≥3 字符"的**（用例要验的是"真符号能过核对、编造的会被标出"，
+不该依赖"第一名恰好可识别"）。这类失败与代码正确性无关，但**只有把语料换成项目自己才会暴露** ——
+本地复现 CI 的跑法：`mvn -B -o test -Dreadcodeai.verify.repo=.`。
+
+**同一轮还确认了老坑的威力**：本地把语料换成项目自己之后，`ToolsTest` 两条与 `SupportCheckerTest` 一条立刻变红 ——
+因为本地的项目索引是**改动前**建的（候选：`FILE_NOT_FOUND` / `CONTENT_MISMATCH`）。
+按老规矩删掉旧索引行（`DELETE FROM repo WHERE root_path LIKE '%ReadCodeAI%';`）重跑 → **211 全绿 · 0 失败 · 20 跳过**。
+**结论：改了源码再用"项目当语料"跑测试，必须先清掉那条索引行**（这就是 HANDOFF 里那条坑的又一次实证）。
+
+
 

@@ -19,6 +19,7 @@ import com.readcodeai.retrieve.model.RepoView;
 import com.readcodeai.retrieve.model.SymbolView;
 import com.readcodeai.verify.TestCorpus;
 import org.junit.jupiter.api.Test;
+import com.readcodeai.agent.springai.TestEngines;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
@@ -242,7 +243,7 @@ class AgentAnswerCacheTest {
         AnswerService singleHop = new AnswerService(textRetriever, queries, queryRouter, contextSelector,
                 evidenceVerifier, evidenceRepair, com.readcodeai.verify.TestCheckers.NONE, client, properties,
                 com.readcodeai.verify.TestAnswerLogs.silent(properties));
-        return new AgentService(singleHop, new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, client, 2),
+        return new AgentService(singleHop, com.readcodeai.agent.springai.TestEngines.unused(),
                 queryRouter, queries, client, cache, properties,
                 com.readcodeai.verify.TestAnswerLogs.silent(properties), summaryAnswerer);
     }

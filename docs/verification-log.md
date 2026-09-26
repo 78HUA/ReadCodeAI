@@ -2204,3 +2204,39 @@ Spring AI 侧原先只统计"有工具调用的轮次"（3.67 = 跳数），手�
 跑法：`mvn -B -o test -Dreadcodeai.verify.repo=C:/Users/HUA/.readcodeai/repos/gson`
 （语料路径必须给，否则所有基于语料的用例会 skip；数据库口令 `READCODEAI_DB_PASSWORD` 也要在环境里）。
 
+### 手写引擎退役第二步：物理删除 · 2026-09-26
+
+**删掉的东西**（代码都在 git 历史里，tag `pre-spring-ai` 与提交 `4698755`）：
+
+| 文件 | 行数 | 去向 |
+|---|---|---|
+| `agent/AgentLoop.java` | 581 | 删（9 条循环行为用例已在第一步搬到 `SpringAiLoopBehaviorTest`） |
+| `agent/AgentConfig.java` | 28 | 删（只为造 `AgentLoop` 而存在） |
+| `agent/AgentLoopTest.java` | 9 个用例 | 删（已平移） |
+| `agent/PromptCompactionTest.java` | 2 个用例 | 删（A-B 压缩语义由 `PromptCompactionAdvisorTest` 3 条守着，另有 `SpringAiEngineOfflineTest` 验"循环里真的压了"） |
+
+**跟着简化的东西**：`AgentService` 只留一个构造器（注入 `AgentEngine`，不再有"9 参兼容构造器"与按配置切引擎的开关）；
+`ReadCodeAiProperties.Agent`（含 `Engine` 枚举）整体删除；`application.yml` 去掉 `readcodeai.agent.engine`；
+`SpringAiAgentLoop` 去掉 `@ConditionalOnProperty`，成为唯一实现；
+`AgentEngine` **接口保留**（它是测试的缝，也是以后换引擎的缝），并新增 `id()` —— 它仍要进答案缓存的键。
+
+**改接测试的地方**（4 个服务层用例 + 2 个实测用例）：新增测试替身 `agent/springai/TestEngines.java` ——
+`on(模型, …)` 手工装配跑在脚本模型上的真引擎（给那些自己 `new AgentService` 的用例），
+`unavailable(reason)` / `unused()` 两种"引擎不该被用到"的场合（用到就直接失败，比静默返回空答案好）。
+`ScriptedLlmClient` 保留：单跳、③ 层、代码审查、总结这四条路走的仍是 `LlmClient`。
+
+**顺带修掉一处"会变的全局状态"依赖**：`SpringAiEngineOfflineTest` 原先用
+`queries.requireLatestRepoId()` 拿仓库（老坑：最近索引的仓库是会变的）—— 语料被重新索引后它换成了
+语料仓，"问题里的符号"就解析不出来、提示词里没有位置信息，两条用例变红。**这与代码无关，但在 CI/本机
+都会随机咬人**，已改成 `TestCorpus.resolve` 指名道姓 + 问句用**语料里真实存在的符号**。
+
+**验证**：离线集 **211 个 · 0 失败 · 0 错误 · 23 跳过**（211 = 上一步的 222 − 11 条已平移/已删的用例）。
+跑法同上一节（`-Dreadcodeai.verify.repo=…` 与 `READCODEAI_DB_PASSWORD` 都要给）。
+
+**过程里踩到的一个真坑（值得记）**：`TestEngines` 最初把**同一个** `ChatClient.Builder` 反复返回，
+于是同一个引擎跑第二次 `ask()` 时叠出了两个工具循环 advisor，框架直接抛
+`At most one ToolAdvisor is allowed in the advisor chain`。
+根因是 Builder **可变**、而容器里那个 `ChatClient.Builder` 是 **prototype** 作用域（每取一次是新的，所以生产路径没事）。
+测试替身必须如实模拟这个语义 —— 每次 `getIfAvailable()` 返回新 Builder。
+
+

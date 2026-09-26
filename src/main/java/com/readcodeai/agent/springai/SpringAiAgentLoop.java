@@ -3,7 +3,6 @@ package com.readcodeai.agent.springai;
 import com.readcodeai.agent.model.AgentSeeds;
 
 import com.readcodeai.agent.AgentEngine;
-import com.readcodeai.agent.AgentLoop;
 import com.readcodeai.agent.LlmUnavailableException;
 import com.readcodeai.agent.ModelJson;
 import com.readcodeai.agent.ModelOutputFormatException;
@@ -30,7 +29,6 @@ import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Path;
@@ -38,24 +36,30 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Spring AI 版的多跳引擎：**框架跑工具循环**，四类约束用它的扩展点实现。
+ * 多跳引擎：**框架跑工具循环**，四类约束用它的扩展点实现。（2026-09-26 起是唯一的实现 ——
+ * 手写版那 9 条循环行为用例已逐条搬到这里，见 {@code SpringAiLoopBehaviorTest}。）
  *
- * <h3>与手写版（{@link AgentLoop}）的对应关系</h3>
+ * <h3>四类约束分别落在哪</h3>
  * <ul>
  *   <li>循环本体 + 工具协议 → 框架的 ToolCallingAdvisor（**这 800 多行不写了**）</li>
  *   <li>四维预算 → {@link BudgetToolCallingManager}（注册 Bean 覆盖默认执行器）</li>
- *   <li>环检测 + 每跳带证据 → {@link SpringAiLoopState}（与手写版同一个 {@code VisitedEdgeSet}）</li>
+ *   <li>环检测 + 每跳带证据 → {@link SpringAiLoopState}</li>
  *   <li>结论证据核验 +（不过就）退回重发 → 本类循环外的两轮调用（框架一次调用出一次结论，
- *       重发只能在它外面再包一层 —— 这与手写版里 continue 一次的语义等价）</li>
+ *       重发只能在它外面再包一层）</li>
  *   <li>确定性路由的种子、"引用必须有据可依"、③ 层核验 → 全部原样复用（框架碰不到它们）</li>
  * </ul>
  *
  * <p><b>降级纪律不变</b>：没配 Key 时 Spring AI 不会创建模型 Bean，本类构造不出来时
- * {@link AgentService} 也不会走到它；真走到这里则抛 {@link LlmUnavailableException}，与手写版一致。
+ * {@link AgentService} 也不会走到它；真走到这里则抛 {@link LlmUnavailableException}。
  */
 @Component
-@ConditionalOnProperty(name = "readcodeai.agent.engine", havingValue = "spring-ai")
 public class SpringAiAgentLoop implements AgentEngine {
+
+    /** 引擎标识（要进答案缓存的键）：短名字，别跟着类名走。 */
+    @Override
+    public String id() {
+        return "spring-ai";
+    }
 
     private static final Logger log = LoggerFactory.getLogger(SpringAiAgentLoop.class);
 

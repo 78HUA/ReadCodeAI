@@ -1,6 +1,5 @@
 package com.readcodeai.eval;
 
-import com.readcodeai.agent.AgentLoop;
 import com.readcodeai.agent.AgentService;
 import com.readcodeai.agent.AnswerService;
 import com.readcodeai.agent.ScriptedLlmClient;
@@ -117,21 +116,43 @@ class MultiHopComparisonTest {
      */
     private AgentService productOf(ChainQuestionGenerator.ChainQuestion question) {
         List<String> lines = new ArrayList<>();
+        List<org.springframework.ai.chat.model.ChatResponse> script = new ArrayList<>();
         if (question != null) {
             lines.add(ScriptedLlmClient.callTool("findCallers", "symbol",
                     question.target().qualifiedName()));
+            script.add(callFindCallers(question.target().qualifiedName()));
             for (String name : generator.bfsPlan(question.target().id(), question.depth() - 1)) {
                 lines.add(ScriptedLlmClient.callTool("findCallers", "symbol", name));
+                script.add(callFindCallers(name));
             }
             lines.add(ScriptedLlmClient.answer("上游调用链已查完", question.target().filePath(),
                     question.target().startLine(), question.target().endLine(), null));
+            script.add(com.readcodeai.agent.springai.ScriptedChatModel.text(
+                    finalJson(question.target().filePath(), question.target().startLine(),
+                            question.target().endLine())));
         }
+        // 多跳引擎跑在脚本模型上（理想模型：按 BFS 走完真值那条路）；
+        // 单跳基线仍走脚本化的 LlmClient —— 两条路各自的模型不一样，本来就该分开喂
+        var stub = new com.readcodeai.agent.springai.ScriptedChatModel()
+                .scriptLines(script.toArray(org.springframework.ai.chat.model.ChatResponse[]::new));
         return new AgentService(answerService,
-                new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE,
-                        ScriptedLlmClient.lines(lines.toArray(String[]::new)), 2),
+                com.readcodeai.agent.springai.TestEngines.on(stub, toolRegistry, evidenceVerifier,
+                        com.readcodeai.verify.TestCheckers.NONE, properties),
                 queryRouter, queries, ScriptedLlmClient.lines(lines.toArray(String[]::new)),
                 new com.readcodeai.agent.cache.NoopAnswerCache("对比实验不用缓存（每轮都真跑）"), properties,
                 com.readcodeai.verify.TestAnswerLogs.silent(properties), summaryAnswerer);
+    }
+
+    private static org.springframework.ai.chat.model.ChatResponse callFindCallers(String symbol) {
+        return com.readcodeai.agent.springai.ScriptedChatModel.toolCall("findCallers",
+                "{\"symbol\":\"" + symbol + "\"}");
+    }
+
+    /** 一条合法的结论 JSON（不写 snippet：只核验文件与行号）。 */
+    private static String finalJson(String file, int startLine, int endLine) {
+        return """
+                {"final":{"answer":"上游调用链已查完。","evidence":[{"file":"%s","startLine":%d,"endLine":%d,                "snippet":"","why":"逐跳查到调用链"}],"refused":false,"refusalReason":""}}"""
+                .formatted(file, startLine, endLine);
     }
 
     /**

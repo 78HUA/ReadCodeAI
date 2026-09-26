@@ -106,17 +106,24 @@ class AgentServiceTest {
         SymbolView target = firstWithCallers(repo.id());
         List<String> plan = chainGenerator.bfsPlan(target.id(), 1);
         assumeTrue(!plan.isEmpty(), "语料里没有上游调用者，跳过");
-        ScriptedLlmClient client = ScriptedLlmClient.lines(
-                ScriptedLlmClient.callTool("findCallers", "symbol", target.qualifiedName()),
-                ScriptedLlmClient.answer("上游查到 " + plan.size() + " 个直接调用者", target.filePath(),
-                        target.startLine(), target.endLine(), null));
+        // 多跳引擎跑在脚本模型上：查一跳 → 给结论
+        var stub = new com.readcodeai.agent.springai.ScriptedChatModel();
+        stub.scriptLines(
+                callFindCallers(target.qualifiedName()),
+                com.readcodeai.agent.springai.ScriptedChatModel.text(
+                        finalJson(target.filePath(), target.startLine(), target.endLine())));
+        // 单跳那条路不该被走到（走到了就直接失败）
+        ScriptedLlmClient client = new ScriptedLlmClient((t, prompt) -> {
+            throw new AssertionError("这条用例应当走多跳");
+        });
 
         // 题面里既有「谁调用」（会命中确定性路由），又有「间接」（单跳答不了）
-        AgentAnswer answer = serviceWith(client)
+        AgentAnswer answer = serviceWith(client, com.readcodeai.agent.springai.TestEngines.on(stub,
+                        toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, properties))
                 .ask(repo.id(), "谁调用了 " + target.qualifiedName() + "？间接的也要。",
                         AgentMode.MULTI_HOP, null, 8);
 
-        assertThat(client.calls()).as("必须真的走了多跳（模型被调用）").isGreaterThanOrEqualTo(2);
+        assertThat(stub.calls()).as("必须真的走了多跳（模型被调用）").isGreaterThanOrEqualTo(2);
         assertThat(answer.mode()).isEqualTo(AgentMode.MULTI_HOP);
         assertThat(answer.steps()).isNotEmpty();
         assertThat(answer.answeredBy()).isEqualTo(AnsweredBy.LLM);
@@ -147,7 +154,9 @@ class AgentServiceTest {
     @Test
     void multiHopRefusesToPretendWhenNoModelIsConfigured() {
         AgentService service = new AgentService(answerService,
-                new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, new NoopLlmClient("测试：未配置"), 2),
+                com.readcodeai.agent.springai.TestEngines.unavailable(
+                        "未配置模型（spring.ai.openai.*），Spring AI 多跳引擎不可用；"
+                                + "定位 / 调用关系 / 实现类 / 全文检索等确定性能力不受影响"),
                 queryRouter, queries, new NoopLlmClient("测试：未配置"),
                 new com.readcodeai.agent.cache.NoopAnswerCache("测试"), properties,
                 com.readcodeai.verify.TestAnswerLogs.silent(properties), summaryAnswerer);
@@ -155,7 +164,7 @@ class AgentServiceTest {
 
         assertThatThrownBy(() -> service.ask(repo.id(), "这个参数是从哪来的？", AgentMode.MULTI_HOP, null, 8))
                 .isInstanceOf(LlmUnavailableException.class)
-                .hasMessageContaining("多跳检索不可用")
+                .hasMessageContaining("多跳引擎不可用")
                 .hasMessageContaining("确定性能力不受影响");
     }
 
@@ -174,8 +183,15 @@ class AgentServiceTest {
 
         // 脚本模型每轮去查一个**不同**的符号：永远不给结论，直到预算把它掐停。
         // 换着符号查是为了不触发"重复调用"的环检测 —— 那会让它提前停，就量不到预算差异了
-        AgentService service = serviceWith(new ScriptedLlmClient((turn, prompt) ->
-                ScriptedLlmClient.callTool("findDefinition", "symbol", symbols[(turn - 1) % symbols.length])));
+        com.readcodeai.agent.springai.ScriptedChatModel stub = new com.readcodeai.agent.springai.ScriptedChatModel();
+        java.util.concurrent.atomic.AtomicInteger turn = new java.util.concurrent.atomic.AtomicInteger();
+        stub.script(prompt -> com.readcodeai.agent.springai.ScriptedChatModel.toolCall("findDefinition",
+                "{\"symbol\":\"" + symbols[turn.getAndIncrement() % symbols.length] + "\"}"));
+        // 单跳那条路不该被走到：真走到了就当场失败，别让它悄悄换个引擎继续跑
+        AgentService service = serviceWith(new ScriptedLlmClient((t, prompt) -> {
+            throw new AssertionError("这条用例问的是链式问题，不该走单跳");
+        }), com.readcodeai.agent.springai.TestEngines.on(stub, toolRegistry, evidenceVerifier,
+                com.readcodeai.verify.TestCheckers.NONE, properties));
 
         String question = "这个参数是从哪来的：" + symbols[0] + "？";
         AgentAnswer normal = service.ask(repo.id(), question, AgentMode.MULTI_HOP, null, 8, false);
@@ -184,7 +200,7 @@ class AgentServiceTest {
         assertThat(normal.stopReason()).isEqualTo(StopReason.BUDGET_ROUNDS);
         assertThat(deep.stopReason()).isEqualTo(StopReason.BUDGET_ROUNDS);
         // 轮次算术：模型实际被调用 maxRounds-1 次 —— 最后那"1 轮"是留给**结论**的，
-        // 而模型在被判为最后一轮时还想着调工具，就直接停机（见 AgentLoop 与配置里的注释）
+        // 而模型在被判为最后一轮时还想着调工具，就直接停机（见 BudgetToolCallingManager 与配置里的注释）
         assertThat(normal.rounds()).isEqualTo(properties.getLlm().getMaxRounds() - 1);
         assertThat(deep.rounds()).as("深链模式应当跑满 deep 那套额度")
                 .isEqualTo(properties.getLlm().getDeep().getMaxRounds() - 1);
@@ -197,13 +213,30 @@ class AgentServiceTest {
      * <p>踩过一次坑：只把脚本模型喂给多跳循环，单跳那条路仍然用容器里注入的 Noop 客户端，
      * 于是"单跳模式"的测试直接报"未配置 LLM" —— 测试自己搭的架子，必须两处一起换。
      */
+    /** 走单跳 / 确定性路线的那批用例：多跳引擎**不该被调用到**，用替身占位（调到了就直接失败）。 */
     private AgentService serviceWith(LlmClient client) {
+        return serviceWith(client, com.readcodeai.agent.springai.TestEngines.unused());
+    }
+
+    private AgentService serviceWith(LlmClient client, AgentEngine engine) {
         AnswerService singleHop = new AnswerService(textRetriever, queries, queryRouter, contextSelector,
                 evidenceVerifier, evidenceRepair, com.readcodeai.verify.TestCheckers.NONE, client, properties,
                 com.readcodeai.verify.TestAnswerLogs.silent(properties));
-        return new AgentService(singleHop, new AgentLoop(toolRegistry, evidenceVerifier, com.readcodeai.verify.TestCheckers.NONE, client, 2),
+        return new AgentService(singleHop, engine,
                 queryRouter, queries, client, new com.readcodeai.agent.cache.NoopAnswerCache("测试"),
                 properties, com.readcodeai.verify.TestAnswerLogs.silent(properties), summaryAnswerer);
+    }
+
+    private static org.springframework.ai.chat.model.ChatResponse callFindCallers(String symbol) {
+        return com.readcodeai.agent.springai.ScriptedChatModel.toolCall("findCallers",
+                "{\"symbol\":\"" + symbol + "\"}");
+    }
+
+    /** 一条合法的结论 JSON（不写 snippet：只核验文件与行号）。 */
+    private static String finalJson(String file, int startLine, int endLine) {
+        return """
+                {"final":{"answer":"上游调用链已查完。","evidence":[{"file":"%s","startLine":%d,"endLine":%d,                "snippet":"","why":"工具查到的位置"}],"refused":false,"refusalReason":""}}"""
+                .formatted(file, startLine, endLine);
     }
 
     private SymbolView firstWithCallers(long repoId) {

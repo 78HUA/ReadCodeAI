@@ -3,7 +3,7 @@ package com.readcodeai.evidence;
 import com.readcodeai.agent.model.AgentSeeds;
 
 import com.readcodeai.agent.AnswerService;
-import com.readcodeai.agent.AgentLoop;
+import com.readcodeai.agent.AgentEngine;
 import com.readcodeai.agent.ScriptedLlmClient;
 import com.readcodeai.agent.ToolRegistry;
 import com.readcodeai.agent.model.AnsweredBy;
@@ -258,15 +258,24 @@ class SupportCheckerTest {
                 .filter(call -> call.symbolId() != null)
                 .findFirst()
                 .orElseThrow();
-        ScriptedLlmClient client = ScriptedLlmClient.lines(
-                ScriptedLlmClient.callTool("findCallers", "symbol", target.qualifiedName()),
-                ScriptedLlmClient.answer("上游一共这么几处", caller.callSiteFile(), caller.callLine(),
-                        caller.callLine(), null),
+        // 两条脚本分开写：多跳引擎用脚本模型（查一跳 + 给结论），③ 层判定器用脚本化的 LlmClient（判成不支持）。
+        // 早先两者共用同一个 client 按次序念台词，多一次/少一次模型调用就会错位。
+        ScriptedLlmClient judge = ScriptedLlmClient.lines(
                 "{\"verdict\":\"unsupported\",\"reason\":\"引的是另一个方法的调用点\"}");
-        AgentLoop loop = new AgentLoop(toolRegistry, evidenceVerifier,
-                new ModelSupportChecker(client, true), client, 2);
+        var stub = new com.readcodeai.agent.springai.ScriptedChatModel();
+        stub.scriptLines(
+                com.readcodeai.agent.springai.ScriptedChatModel.toolCall("findCallers",
+                        "{\"symbol\":\"" + target.qualifiedName() + "\"}"),
+                com.readcodeai.agent.springai.ScriptedChatModel.text(
+                        "{\"final\":{\"answer\":\"上游一共这么几处\",\"evidence\":[{\"file\":\""
+                                + caller.callSiteFile().replace("\\", "\\\\") + "\",\"startLine\":" + caller.callLine()
+                                + ",\"endLine\":" + caller.callLine()
+                                + ",\"snippet\":\"\",\"why\":\"工具查到的调用点\"}],"
+                                + "\"refused\":false,\"refusalReason\":\"\"}}"));
+        AgentEngine engine = com.readcodeai.agent.springai.TestEngines.on(stub, toolRegistry, evidenceVerifier,
+                new ModelSupportChecker(judge, true), properties);
 
-        var answer = loop.run(repo.id(), Path.of(repo.rootPath()),
+        var answer = engine.run(repo.id(), Path.of(repo.rootPath()),
                 "谁调用了 " + target.qualifiedName() + "？间接的也要。",
                 AgentSeeds.none(), new BudgetGuard(8, 60_000, 1_000_000, 100, 0, 0));
 

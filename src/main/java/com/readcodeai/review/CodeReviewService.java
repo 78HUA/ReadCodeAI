@@ -44,7 +44,7 @@ import java.util.stream.Collectors;
  * </ol>
  *
  * <p>单轮调用，不做多跳：审查的对象是**一段代码**，材料一次就能给全；
- * 需要多跳的是"这个参数从哪来"那类链式问题，那是 {@code AgentLoop} 的活。
+ * 需要多跳的是"这个参数从哪来"那类链式问题，那是多跳引擎（{@link com.readcodeai.agent.AgentEngine}）的活。
  */
 @Service
 public class CodeReviewService {

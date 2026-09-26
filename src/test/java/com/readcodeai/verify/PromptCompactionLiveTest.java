@@ -1,6 +1,5 @@
 package com.readcodeai.verify;
 
-import com.readcodeai.agent.AgentLoop;
 import com.readcodeai.agent.AgentService;
 import com.readcodeai.agent.AnswerService;
 import com.readcodeai.agent.SummaryAnswerer;
@@ -70,6 +69,10 @@ class PromptCompactionLiveTest {
 
     @Autowired
     private LlmClient llmClient;
+
+    /** 真模型（容器里的那个 Builder）：引擎按它建 ChatClient。 */
+    @Autowired
+    private org.springframework.beans.factory.ObjectProvider<org.springframework.ai.chat.client.ChatClient.Builder> chatClientBuilder;
 
     @Autowired
     private ChainQuestionGenerator generator;
@@ -151,11 +154,18 @@ class PromptCompactionLiveTest {
                 + "指向性的结论看离线同轨迹那组）");
     }
 
-    /** 每组一个 AgentService：区别只在 AgentLoop 拿到的 keepFullObservations。 */
+    /**
+     * 每组一个 AgentService：区别只在引擎拿到的 {@code keepFullObservations}（近几跳留原文，更早的压成一行）。
+     *
+     * <p>用的是**容器里那个真模型**（ChatClient.Builder）：这条用例本来就要真模型才量得出 token 差异。
+     * 配置单独造一份，不动容器里那份共享的 —— 否则两组之间会互相污染。
+     */
     private AgentService serviceWith(int keepFullObservations) {
-        AgentLoop loop = new AgentLoop(toolRegistry, evidenceVerifier, TestCheckers.NONE, llmClient,
-                keepFullObservations);
-        return new AgentService(answerService, loop, queryRouter, queries, llmClient,
+        com.readcodeai.config.ReadCodeAiProperties config = new com.readcodeai.config.ReadCodeAiProperties();
+        config.getLlm().setKeepFullObservations(keepFullObservations);
+        var engine = new com.readcodeai.agent.springai.SpringAiAgentLoop(chatClientBuilder, toolRegistry,
+                evidenceVerifier, TestCheckers.NONE, config);
+        return new AgentService(answerService, engine, queryRouter, queries, llmClient,
                 new NoopAnswerCache("A/B 实验必须禁用缓存：否则第二组会命中第一组的答案、token 变成 0"),
                 properties, TestAnswerLogs.silent(properties), summaryAnswerer);
     }

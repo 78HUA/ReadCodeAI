@@ -29,7 +29,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>门禁与项目里其它 live 测试一致：没配 Key 或接口不通 → 跳过（外部波动不该变成红色）。
  */
 @SpringBootTest(properties = {
-        "readcodeai.agent.engine=spring-ai",
         "readcodeai.llm.keep-full-observations=2"
 })
 class SpringAiEngineLiveTest {

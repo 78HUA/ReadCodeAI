@@ -248,7 +248,8 @@ class AnswerLogTest {
     }
 
     private AgentService agentServiceWith(LlmClient client, AnswerCache cache) {
-        AgentLoop loop = new AgentLoop(toolRegistry, evidenceVerifier, TestCheckers.NONE, client, 2);
+        // 这条用例问的是确定性问题（谁调用了 X），多跳引擎不该被调用到
+        AgentEngine loop = com.readcodeai.agent.springai.TestEngines.unused();
         return new AgentService(answerServiceWith(client), loop, queryRouter, queries, client, cache,
                 properties, answerLogService, summaryAnswerer);
     }

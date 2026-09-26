@@ -34,7 +34,7 @@ import tools.jackson.databind.ObjectMapper;
  *   <li><b>token 是两笔账</b>：生成答案的用量与 ③ 层核验的用量分开存
  *       （{@code support_*} 两列），金额把两笔按同一单价加起来。
  *       多跳路径里 ③ 层核验在预算循环**之外**调用、没有计入 {@code BudgetGuard}，
- *       所以这里的相加不会重复计（改动 AgentLoop 时要注意这一点）。</li>
+ *       所以这里的相加不会重复计（改动多跳引擎的记账点时要注意这一点）。</li>
  * </ol>
  */
 @Service

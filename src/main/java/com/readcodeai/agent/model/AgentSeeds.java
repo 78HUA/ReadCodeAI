@@ -11,7 +11,7 @@ import java.util.List;
  * <p>第二个作用同样重要：{@code evidence} 里那些位置会参与"**引用有没有依据**"的判定 ——
  * 种子把目标符号的定义行交到模型手上，那它引用这个定义就是有据可依，不会被误杀。
  *
- * <p>这个类型原先嵌在 {@code AgentLoop} 里；两个引擎（手写 / Spring AI）都要用它，
+ * <p>这个类型原先嵌在手写引擎里；引擎与调用方（{@code AgentService}）都要用它，
  * 所以提到了 model 包 —— 契约不该挂在某一个实现身上。
  */
 public record AgentSeeds(List<String> lines, List<AskEvidence> evidence) {

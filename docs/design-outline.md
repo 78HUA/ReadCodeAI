@@ -283,7 +283,7 @@
                             │
 ┌───────────────────────────▼─────────────────────────────────┐
 │  编排层 (agent)                                              │
-│  AgentLoop（手写 tool-calling 循环） · ToolRegistry           │
+│  SpringAiAgentLoop（Spring AI 跑工具循环） · ToolRegistry     │
 │  BudgetGuard（四维预算） · VisitedEdgeSet（环检测）           │
 └───────┬──────────────────────────────────┬──────────────────┘
         │                                  │
@@ -336,7 +336,10 @@ com.readcodeai
 │   ├── VectorRetriever.java           第 3 层（v1 仅接口与空实现）
 │   └── model/                         RetrievalResult / Snippet
 ├── agent/
-│   ├── AgentLoop.java                 手写 tool-calling 循环
+│   ├── springai/                      多跳引擎（Spring AI 跑工具循环；
+│   │                                  BudgetToolCallingManager=四维预算、
+│   │                                  SpringAiLoopState=环检测+逐跳证据、
+│   │                                  PromptCompactionAdvisor=A-B 压缩）
 │   ├── ToolRegistry.java
 │   ├── tools/                         FindDefinitionTool / FindCallersTool / FindCalleesTool /
 │   │                                  FindImplementationsTool / ReadSymbolTool / TextSearchTool
@@ -554,8 +557,8 @@ readcodeai:
 | Java 解析 | **JavaParser** | **3.28.2** | 纯 Java 无 native 依赖；能拿到符号、调用关系与精确位置 |
 | 存储 | **MySQL** | 8.0.42（本机已有） | 符号表 + 边表 + 递归 CTE 足够；省略图数据库 |
 | 数据访问 | **JdbcTemplate** | Boot 自带 | 表结构就是为查询设计的，SQL 比 ORM 映射更直白 |
-| LLM | **OpenAI 兼容 HTTP 接口** | — | 手写客户端，供应商可换（不绑 SDK） |
-| 工具调用 | **手写 tool-calling 循环** | — | 不引 AI 框架（见 4.2） |
+| LLM | **Spring AI**（OpenAI 兼容） | 2.0.1 | 模型层走框架的 `ChatClient`（2026-09-26 从手写 HTTP 客户端迁入，见 `spring-ai-migration.md`）；供应商仍可换（只改配置） |
+| 工具调用 | **Spring AI 的工具循环** | 2.0.1 | 循环本体用框架（`ToolCallingAdvisor`），四类约束做在它的扩展点上（见 4.2 的更新说明） |
 | 接口 | REST + CLI + **Vue 3 前端** | — | REST 与 CLI 是引擎的对外通道（第 1 步起就有）；前端是产品面，**排到第 8 步**——引擎没定型前做界面等于返工 |
 
 ### 4.2 明确不引入的（每条都给理由）
@@ -564,7 +567,7 @@ readcodeai:
 |---|---|
 | **向量库**（Milvus/pgvector/Chroma 等） | 第一版绝大多数问题靠符号表 + 调用图 + 全文检索就能答对，**而且答案更准（确定 vs 概率）**。加向量库会引入「用概率手段解决确定问题」的倒退。等真做到「模糊语义查找」那一步再加，并且**要有数据说明它带来了什么提升** |
 | **图数据库**（Neo4j 等） | 调用图查询是「直接前驱/后继 + 有限跳递归」，MySQL 递归 CTE 够用，少一个中间件 |
-| **AI 框架**（Spring AI / LangChain4j） | 需要的是最简单的 `/chat/completions` + 工具循环，手写 200 行以内；引框架会带来版本兼容风险，且**框架把工具循环藏起来了，反而讲不清「Agent 体现在哪」** |
+| ~~**AI 框架**（Spring AI / LangChain4j）~~ | ✅ **已改判**（2026-09-26）：原来判「不引」的理由是两条 —— 版本兼容风险、框架把工具循环藏起来。**实测后两条都不成立**：Spring AI **2.0.1 直接配 Boot 4.1.1（不用降级）**；循环虽交给框架，但四维预算 / 环检测 / 逐跳证据 / A-B 压缩仍全做在自己的扩展点上（`ToolCallingManager` / 工具侧状态 / `CallAdvisor`），「Agent 体现在哪」照样讲得清。**A/B 实测召回持平（86.7%）、净省约 170 行**；手写版随后退役（它那 9 条循环行为用例已搬到 Spring AI 引擎上）。详见 `docs/spring-ai-migration.md` |
 | **ORM**（JPA/MyBatis） | 见 4.1 |
 | **Docker** | 本机没装（见第 7 章环境事实），且第一版不需要 |
 | **ES** | 仍然没有对应场景：全文检索用 MySQL 内置 FULLTEXT 就够（ngram 解析器让中文注释也能搜） |
@@ -662,7 +665,7 @@ readcodeai:
 | 项 | 内容 |
 |---|---|
 | **目标** | 从「单次问答」升级为「自主多跳」 |
-| **产出** | `AgentLoop` + 工具集 + 环检测 + 四维预算；每跳强制带证据 |
+| **产出** | 多跳循环 + 工具集 + 环检测 + 四维预算；每跳强制带证据（循环最初是手写的 `AgentLoop`，2026-09-26 由 Spring AI 承接，见 4.1/4.2） |
 | **验证** | 同一批复杂问题（「这个参数从哪来」）对比**单跳 vs 多跳**的答案完整度；统计**平均跳数**与成本 |
 | **判据** | 多跳在复杂问题上完整度显著提升，且**每次都能在预算内终止**（无失控循环） |
 | **提交信息** | 新增多跳 Agent 循环（含环检测与四维预算） |

@@ -26,12 +26,13 @@ public class NoopAnswerCache implements AnswerCache {
     }
 
     @Override
-    public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode, String model) {
+    public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode, String model,
+                                     String engine) {
         return Optional.empty();
     }
 
     @Override
-    public void put(long repoId, String indexedAt, String question, String mode, String model,
+    public void put(long repoId, String indexedAt, String question, String mode, String model, String engine,
                     AgentAnswer answer) {
         // 什么都不做是正确行为：缓存不可用时，问答照常跑，只是每次都真算
     }

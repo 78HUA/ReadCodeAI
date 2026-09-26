@@ -116,6 +116,17 @@ public class AgentLoop implements AgentEngine {
      *              也顺带展示了确定性层与模型层的分工：**能算准的先算，模型从算准的地方起步**
      */
     @Override
+    public boolean available() {
+        return llmClient.available();
+    }
+
+    @Override
+    public String unavailableReason() {
+        return "未配置 LLM（readcodeai.llm.*），多跳检索不可用；"
+                + "定位 / 调用关系 / 实现类 / 全文检索等确定性能力不受影响";
+    }
+
+    @Override
     public AgentAnswer run(long repoId, Path repoRoot, String question, Seeds seeds,
                            BudgetGuard budget) {
         long startNanos = System.nanoTime();

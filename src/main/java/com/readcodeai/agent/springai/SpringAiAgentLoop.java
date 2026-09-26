@@ -71,12 +71,14 @@ public class SpringAiAgentLoop implements AgentEngine {
 
             硬性规则：
             1. 给结论时**只输出 JSON**，不要 Markdown 代码块，不要 JSON 以外的任何文字；
-            2. 每条证据必须给 file + startLine + endLine。snippet 是**可选**的：想给就从工具结果里
+            2. **每一轮先用一句话说明"我为什么要做这个动作"**（这句会记进本次轨迹，供人核对你的思路），
+               然后再调工具或给结论；
+            3. 每条证据必须给 file + startLine + endLine。snippet 是**可选**的：想给就从工具结果里
                **逐字照抄**那几行（对不上就作废），不想给就留空字符串 —— 留空只核验文件与行号，不算错；
-            3. **需要沿调用链向上追的问题（"这个值/这个参数从哪来"），就用 findCallers 一跳一跳往上查**，
+            4. **需要沿调用链向上追的问题（"这个值/这个参数从哪来"），就用 findCallers 一跳一跳往上查**，
                直到够用为止 —— 追几跳由你判断；往下追影响面用 findCallees；
-            4. 同一个调用不要重复（重复会被拒绝，白白消耗预算）；材料够回答就**停下给结论**，不要为了多查而多查；
-            5. 材料足以回答时**必须给出结论**（"无法确定"不是结论：把查到的事实讲清楚，并给出它们的位置）；
+            5. 同一个调用不要重复（重复会被拒绝，白白消耗预算）；材料够回答就**停下给结论**，不要为了多查而多查；
+            6. 材料足以回答时**必须给出结论**（"无法确定"不是结论：把查到的事实讲清楚，并给出它们的位置）；
                确实材料不足才输出 refused=true，并在 refusalReason 里说明**缺什么**。不要猜、不要编。
             """;
 
@@ -93,6 +95,17 @@ public class SpringAiAgentLoop implements AgentEngine {
         this.toolRegistry = toolRegistry;
         this.evidenceVerifier = evidenceVerifier;
         this.supportChecker = supportChecker;
+    }
+
+    @Override
+    public boolean available() {
+        return chatClientBuilder.getIfAvailable() != null;
+    }
+
+    @Override
+    public String unavailableReason() {
+        return "未配置模型（spring.ai.openai.*），Spring AI 多跳引擎不可用；"
+                + "定位 / 调用关系 / 实现类 / 全文检索等确定性能力不受影响";
     }
 
     @Override

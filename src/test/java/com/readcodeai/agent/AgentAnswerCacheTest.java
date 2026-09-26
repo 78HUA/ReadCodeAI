@@ -165,17 +165,21 @@ class AgentAnswerCacheTest {
     void theCacheKeyCarriesTheIndexVersionSoAnswersNeverGoStale() {
         String question = "谁调用了它";
         String model = "glm-4-flash";
-        String v1 = RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "MULTI_HOP", model);
-        String v2 = RedisAnswerCache.key(7L, "2026-09-19T11:00:00", question, "MULTI_HOP", model);
+        String engine = "handwritten";
+        String v1 = RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "MULTI_HOP", model, engine);
+        String v2 = RedisAnswerCache.key(7L, "2026-09-19T11:00:00", question, "MULTI_HOP", model, engine);
 
         assertThat(v1).isNotEqualTo(v2).as("索引版本变了，键就必须变 —— 否则会拿到上一版代码的答案");
-        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "MULTI_HOP", model)).isEqualTo(v1);
-        assertThat(RedisAnswerCache.key(8L, "2026-09-19T10:00:00", question, "MULTI_HOP", model)).isNotEqualTo(v1);
-        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "SINGLE_HOP", model)).isNotEqualTo(v1);
-        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question + "？", "MULTI_HOP", model)).isNotEqualTo(v1);
+        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "MULTI_HOP", model, engine)).isEqualTo(v1);
+        assertThat(RedisAnswerCache.key(8L, "2026-09-19T10:00:00", question, "MULTI_HOP", model, engine)).isNotEqualTo(v1);
+        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "SINGLE_HOP", model, engine)).isNotEqualTo(v1);
+        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question + "？", "MULTI_HOP", model, engine)).isNotEqualTo(v1);
         // 换模型（或换供应商）之后，同一个问题必须重新生成：旧答案是上一个模型给的
-        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "MULTI_HOP", "deepseek-chat"))
+        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "MULTI_HOP", "deepseek-chat", engine))
                 .as("模型名必须进键 —— 否则换模型后还会拿到旧模型的答案").isNotEqualTo(v1);
+        // 换多跳引擎之后同理：两个引擎可以共存（配置切换），旧答案不该跨引擎复用
+        assertThat(RedisAnswerCache.key(7L, "2026-09-19T10:00:00", question, "MULTI_HOP", model, "spring-ai"))
+                .as("引擎必须进键 —— 否则换引擎后会拿到另一个引擎的答案").isNotEqualTo(v1);
         assertThat(v1).startsWith("readcodeai:answer:").as("键前缀要能一眼看出是谁写的");
     }
 
@@ -190,16 +194,16 @@ class AgentAnswerCacheTest {
 
         @Override
         public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode,
-                                         String model) {
+                                         String model, String engine) {
             gets++;
-            return Optional.ofNullable(store.get(key(repoId, indexedAt, question, mode)));
+            return Optional.ofNullable(store.get(key(repoId, indexedAt, question, mode, engine)));
         }
 
         @Override
-        public void put(long repoId, String indexedAt, String question, String mode, String model,
+        public void put(long repoId, String indexedAt, String question, String mode, String model, String engine,
                         AgentAnswer answer) {
             puts++;
-            store.put(key(repoId, indexedAt, question, mode), answer);
+            store.put(key(repoId, indexedAt, question, mode, engine), answer);
         }
 
         @Override
@@ -207,8 +211,9 @@ class AgentAnswerCacheTest {
             return "测试替身";
         }
 
-        private static String key(long repoId, String indexedAt, String question, String mode) {
-            return repoId + "|" + indexedAt + "|" + mode + "|" + question;
+        /** 测试替身也把引擎算进键 —— 与真实现（RedisAnswerCache）同一口径。 */
+        private static String key(long repoId, String indexedAt, String question, String mode, String engine) {
+            return repoId + "|" + indexedAt + "|" + mode + "|" + engine + "|" + question;
         }
     }
 
@@ -217,12 +222,12 @@ class AgentAnswerCacheTest {
 
         @Override
         public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode,
-                                         String model) {
+                                         String model, String engine) {
             throw new IllegalStateException("Redis 挂了");
         }
 
         @Override
-        public void put(long repoId, String indexedAt, String question, String mode, String model,
+        public void put(long repoId, String indexedAt, String question, String mode, String model, String engine,
                         AgentAnswer answer) {
             throw new IllegalStateException("Redis 挂了");
         }

@@ -32,13 +32,19 @@ public interface AnswerCache {
      * 漏一个就会出现"缓存明明命中了、界面却不显示"的怪事（写测试时正好踩到）。
      */
     /**
-     * @param model 生成答案用的模型名。**它必须进键**：换模型（或换供应商）之后，
-     *              同一个问题的答案应当重新生成 —— 否则会返回上一个模型的答案（实测中发现的坑）
+     * @param model  生成答案用的模型名。**它必须进键**：换模型（或换供应商）之后，
+     *               同一个问题的答案应当重新生成 —— 否则会返回上一个模型的答案（实测中发现的坑）
+     * @param engine 生成答案用的多跳引擎（{@code handwritten} / {@code spring-ai}）。
+     *               **它也必须进键**：两个引擎可以共存（配置切换），
+     *               不带这一维就会出现"用 A 引擎问过、换 B 引擎直接拿到 A 的答案" ——
+     *               这与"换模型"是同一类漏洞，只是发生在引擎这一层。
      */
-    Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode, String model);
+    Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode, String model,
+                              String engine);
 
     /** 存缓存；失败只记日志，不抛。 */
-    void put(long repoId, String indexedAt, String question, String mode, String model, AgentAnswer answer);
+    void put(long repoId, String indexedAt, String question, String mode, String model, String engine,
+             AgentAnswer answer);
 
     /** 缓存是否真的在工作（界面与日志用得上）。 */
     String describe();

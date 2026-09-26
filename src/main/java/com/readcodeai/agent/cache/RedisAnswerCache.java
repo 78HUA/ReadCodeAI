@@ -51,8 +51,9 @@ public class RedisAnswerCache implements AnswerCache {
     }
 
     @Override
-    public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode, String model) {
-        String key = key(repoId, indexedAt, question, mode, model);
+    public Optional<AgentAnswer> get(long repoId, String indexedAt, String question, String mode, String model,
+                                     String engine) {
+        String key = key(repoId, indexedAt, question, mode, model, engine);
         try {
             String json = redis.opsForValue().get(key);
             if (json == null) {
@@ -68,10 +69,10 @@ public class RedisAnswerCache implements AnswerCache {
     }
 
     @Override
-    public void put(long repoId, String indexedAt, String question, String mode, String model,
+    public void put(long repoId, String indexedAt, String question, String mode, String model, String engine,
                     AgentAnswer answer) {
         try {
-            redis.opsForValue().set(key(repoId, indexedAt, question, mode, model),
+            redis.opsForValue().set(key(repoId, indexedAt, question, mode, model, engine),
                     mapper.writeValueAsString(answer), ttl);
         } catch (RuntimeException e) {
             warnOnce("写缓存失败（不影响本次回答）", e);
@@ -80,21 +81,25 @@ public class RedisAnswerCache implements AnswerCache {
 
     @Override
     public String describe() {
-        return "Redis（键前缀 " + KEY_PREFIX + "，TTL " + ttl.toMinutes() + " 分钟，键里含索引版本）";
+        return "Redis（键前缀 " + KEY_PREFIX + "，TTL " + ttl.toMinutes() + " 分钟，键里含索引版本、模型名与引擎）";
     }
 
     /**
-     * 缓存键 = 前缀 + 仓库 + **索引版本** + 问题（含模式与**模型名**）的摘要。
+     * 缓存键 = 前缀 + 仓库 + **索引版本** + 问题（含模式、**模型名**与**引擎**）的摘要。
      *
      * <p>问题部分取 SHA-256：问题可能很长（几百字），而 Redis 的键越短越好；
      * 同一个问题只要有一个字符不同就算不同问题，这正是我们要的。
      *
      * <p><b>模型名也进键</b>：换模型或换供应商之后，旧答案不该再被返回 ——
      * 摘要缓存与向量早就按模型隔离了，答案缓存这一处是补上的漏洞（换 key/模型时才发现）。
+     *
+     * <p><b>引擎也进键</b>：两个多跳引擎（手写 / Spring AI）可以共存、按配置切换，
+     * 不带这一维就会"用 A 引擎问过、换 B 引擎拿到 A 的答案"（实测发现的同类漏洞，见分支记录）。
      */
-    public static String key(long repoId, String indexedAt, String question, String mode, String model) {
+    public static String key(long repoId, String indexedAt, String question, String mode, String model,
+                             String engine) {
         return KEY_PREFIX + repoId + ":" + (indexedAt == null ? "-" : indexedAt) + ":"
-                + sha256(model + "\n" + mode + "\n" + question);
+                + sha256(engine + "\n" + model + "\n" + mode + "\n" + question);
     }
 
     private static String sha256(String text) {

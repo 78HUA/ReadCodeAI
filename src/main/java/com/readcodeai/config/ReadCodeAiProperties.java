@@ -18,6 +18,7 @@ public class ReadCodeAiProperties {
     private final Queue queue = new Queue();
     private final Lock lock = new Lock();
     private final RateLimit rateLimit = new RateLimit();
+    private final Agent agent = new Agent();
 
     /** 启动时校验，非法值当场失败 —— 预算参数写错要到运行时才暴露，代价太大。 */
     @PostConstruct
@@ -31,6 +32,7 @@ public class ReadCodeAiProperties {
         queue.validate();
         lock.validate();
         rateLimit.validate();
+        agent.validate();
     }
 
     public Llm getLlm() {
@@ -67,6 +69,78 @@ public class ReadCodeAiProperties {
 
     public RateLimit getRateLimit() {
         return rateLimit;
+    }
+
+    public Agent getAgent() {
+        return agent;
+    }
+
+    /**
+     * 多跳引擎的选择（{@code readcodeai.agent.engine}）。
+     *
+     * <p>**为什么两个引擎都留着**：Spring AI 版是实测过的另一条实现（见 {@code docs/spring-ai-migration.md}）——
+     * 它在工具循环、多供应商、流式这些地方省事；手写版在"每跳带模型的推理（thought）"、
+     * 四维预算的精细度上更直接。两者共用同一个 {@code AgentEngine} 契约与同一套核验/缓存/记账，
+     * 所以留一个开关，A/B 与回退都是改一行配置的事。
+     *
+     * <p>**它同时要进答案缓存的键**：不带这一维，用 A 引擎问过的问题会直接把 A 的答案交给 B。
+     */
+    public static class Agent {
+
+        /** 引擎名（与历史配置值一致，可写 {@code spring-ai} / {@code SPRING_AI} / {@code handwritten}）。 */
+        public enum Engine {
+            /** 手写多跳循环（{@code AgentLoop}）—— 保留为可切换的退路与 A/B 对照 */
+            HANDWRITTEN("handwritten"),
+            /** Spring AI 版（框架跑工具循环：{@code agent/springai}） */
+            SPRING_AI("spring-ai");
+
+            private final String value;
+
+            Engine(String value) {
+                this.value = value;
+            }
+
+            public String value() {
+                return value;
+            }
+
+            /** 解析配置值；空值取默认，认不出就当场失败（别默默退回默认值，那样配置写错了没人知道）。 */
+            public static Engine parse(String text) {
+                if (text == null || text.isBlank()) {
+                    return defaultEngine();
+                }
+                String normalized = text.strip().toLowerCase(java.util.Locale.ROOT).replace('_', '-');
+                for (Engine engine : values()) {
+                    if (engine.value.equals(normalized)) {
+                        return engine;
+                    }
+                }
+                throw new IllegalStateException("未知的多跳引擎：" + text
+                        + "（可选 " + HANDWRITTEN.value + " / " + SPRING_AI.value + "）");
+            }
+
+            /** 默认引擎：Spring AI（2026-09-26 起，见 docs/spring-ai-migration.md）。 */
+            public static Engine defaultEngine() {
+                return SPRING_AI;
+            }
+        }
+
+        private Engine engine = Engine.defaultEngine();
+
+        public Engine getEngine() {
+            return engine;
+        }
+
+        /** 允许 YAML 里写 {@code spring-ai}（连字符/大小写都不计较），非法值在绑定时就报错。 */
+        public void setEngine(String text) {
+            this.engine = Engine.parse(text);
+        }
+
+        void validate() {
+            if (engine == null) {
+                throw new IllegalStateException("readcodeai.agent.engine 不能为空");
+            }
+        }
     }
 
     /**

@@ -56,10 +56,11 @@ server:
 
 readcodeai:
   agent:
-    # 多跳引擎：
-    #   handwritten = 手写 AgentLoop（默认，行为与之前完全一致）
-    #   spring-ai   = Spring AI 版（实验：框架跑工具循环，四类约束用它的扩展点实现）
-    engine: ${READCODEAI_AGENT_ENGINE:handwritten}
+    # 多跳引擎（默认 Spring AI，见 docs/spring-ai-migration.md）：
+    #   spring-ai   = 框架跑工具循环；四类约束由本项目的扩展点实现（ToolCallingManager / 工具侧证据收集）
+    #   handwritten = 手写 AgentLoop —— 保留为可切换的退路与 A/B 对照（两者共用同一个 AgentEngine 契约）
+    # 注：引擎名要进答案缓存的键，切换后不会命中另一个引擎的答案。
+    engine: ${READCODEAI_AGENT_ENGINE:spring-ai}
   llm:
     # 三样都给齐才会启用真实客户端；缺任何一样都降级为 Noop，且不影响静态分析能力
     enabled: true

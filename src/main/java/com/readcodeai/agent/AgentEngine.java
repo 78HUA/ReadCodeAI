@@ -20,4 +20,17 @@ public interface AgentEngine {
      * @param seeds 确定性路由已经算准的起点（第 0 跳）；它同时决定"哪些引用算有据可依"
      */
     AgentAnswer run(long repoId, Path repoRoot, String question, AgentLoop.Seeds seeds, BudgetGuard budget);
+
+    /**
+     * 这个引擎当前能不能用。
+     *
+     * <p><b>为什么可用性要问引擎、不问调用方</b>：两个引擎依赖的东西不一样
+     * （手写版要 {@code readcodeai.llm.*} 那个客户端，Spring AI 版要 {@code spring.ai.openai.*}
+     * 的模型 Bean）。调用方自己判断就容易把"另一个引擎能用"误判成"都不能用"——
+     * 这是写离线覆盖测试时真撞出来的（测试给了模型的桩，却仍被手写客户端的检查拦下）。
+     */
+    boolean available();
+
+    /** 不能用时，一句话说清缺什么（这句话会直接给使用者看）。 */
+    String unavailableReason();
 }

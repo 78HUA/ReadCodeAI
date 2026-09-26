@@ -55,9 +55,6 @@ public class PromptCompactionAdvisor implements CallAdvisor {
 
     @Override
     public ChatClientResponse adviseCall(ChatClientRequest request, CallAdvisorChain chain) {
-        if (keepFullHops <= 0) {
-            return chain.nextCall(request);          // 0 = 不压缩（A/B 对照与逃生门）
-        }
         Prompt compacted = compact(request.prompt());
         if (compacted == request.prompt()) {
             return chain.nextCall(request);
@@ -72,8 +69,14 @@ public class PromptCompactionAdvisor implements CallAdvisor {
      * 把"更早那几跳"的工具结果换成一行事实。
      *
      * <p>跳的计数口径：对话历史里**每一条 {@link ToolResponseMessage} 就是一次工具调用**（一跳）。
+     *
+     * <p>{@code keepFullHops <= 0} 表示不压缩（配置里写 0 = 逃生门）—— **守卫放在这里而不是只放调用方**：
+     * 这样直接调用它也是同一个语义，不会出现"0 反而全压掉"。
      */
     Prompt compact(Prompt prompt) {
+        if (keepFullHops <= 0) {
+            return prompt;
+        }
         List<Message> messages = prompt.getInstructions();
         List<Integer> hopIndexes = new ArrayList<>();
         for (int i = 0; i < messages.size(); i++) {

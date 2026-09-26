@@ -45,7 +45,7 @@ import java.util.stream.Collectors;
  * 代价是模型偶尔不守格式（有重发与降级兜着），换来的是**换模型换供应商都不改代码**，
  * 而且整个循环是我们可以读、可以测、可以在面试里讲清楚的一段普通 Java 代码。
  */
-public class AgentLoop {
+public class AgentLoop implements AgentEngine {
 
     private static final Logger log = LoggerFactory.getLogger(AgentLoop.class);
 
@@ -115,6 +115,7 @@ public class AgentLoop {
      * @param seeds 确定性路由给出的已知线索（第 0 跳）。它让模型不必再花一轮去"猜问题里的符号是哪个"，
      *              也顺带展示了确定性层与模型层的分工：**能算准的先算，模型从算准的地方起步**
      */
+    @Override
     public AgentAnswer run(long repoId, Path repoRoot, String question, Seeds seeds,
                            BudgetGuard budget) {
         long startNanos = System.nanoTime();

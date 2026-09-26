@@ -37,11 +37,29 @@ spring:
       # 这里只是别让容器更早拒掉请求
       max-file-size: 200MB
       max-request-size: 210MB
+  ai:
+    openai:
+      # 与 readcodeai.llm.* 共用同一把 Key 与端点（同一份环境变量）。
+      # 只用它给"多跳引擎的 Spring AI 实现"供模型；其余四类模型调用仍走手写客户端。
+      base-url: ${READCODEAI_LLM_BASE_URL:}
+      # 缺 Key 时给个占位值：Spring AI 的自动配置校验非空，而本项目的纪律是"缺 Key 也要能启动"。
+      # 真正能不能用由 readcodeai.agent.engine 与可用性检查决定（占位值永远不会被发出去）。
+      api-key: ${READCODEAI_LLM_API_KEY:no-key-configured}
+      chat:
+        model: ${READCODEAI_LLM_MODEL:glm-4-flash}
+        temperature: 0.2
+        # 智谱官方 FAQ：每次调用只能命中一个函数 —— 默认开着会把这个字段发过去，必须关
+        parallel-tool-calls: false
 
 server:
   port: 8080
 
 readcodeai:
+  agent:
+    # 多跳引擎：
+    #   handwritten = 手写 AgentLoop（默认，行为与之前完全一致）
+    #   spring-ai   = Spring AI 版（实验：框架跑工具循环，四类约束用它的扩展点实现）
+    engine: ${READCODEAI_AGENT_ENGINE:handwritten}
   llm:
     # 三样都给齐才会启用真实客户端；缺任何一样都降级为 Noop，且不影响静态分析能力
     enabled: true

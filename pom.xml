@@ -20,7 +20,22 @@
         <java.version>21</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <javaparser.version>3.28.2</javaparser.version>
+        <!-- Spring AI：只用于"多跳引擎"的实验实现（readcodeai.agent.engine=spring-ai）。
+             2.0.1 的 starter 依赖 spring-boot-starter-restclient:4.1.1，与本项目 Boot 版本精确对上 —— 不用降级。 -->
+        <spring-ai.version>2.0.1</spring-ai.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <!-- Web 接口层。注：Boot 4.x 下 spring-boot-starter-web 仍然可用，
@@ -81,6 +96,16 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
+        </dependency>
+
+        <!--
+            Spring AI（OpenAI 兼容）：为"多跳引擎"提供另一种实现（见 SpringAiAgentLoop）。
+            默认**不启用**（readcodeai.agent.engine=handwritten），所以它只是多一个可选依赖，
+            不改变现有行为；缺 Key 时它不会被调用（与 LLM/Redis/MQ 同一套可降级纪律）。
+        -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-openai</artifactId>
         </dependency>
     </dependencies>
 

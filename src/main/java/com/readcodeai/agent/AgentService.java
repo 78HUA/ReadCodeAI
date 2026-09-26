@@ -18,6 +18,7 @@ import com.readcodeai.retrieve.model.RepoView;
 import com.readcodeai.retrieve.model.SymbolView;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.nio.file.Path;
@@ -51,6 +52,9 @@ public class AgentService {
 
     private final AnswerService answerService;
     private final AgentLoop agentLoop;
+    /** Spring AI 版多跳引擎：只有 `readcodeai.agent.engine=spring-ai` 时才会被装配，所以用 Provider 懒取。 */
+    private final ObjectProvider<com.readcodeai.agent.springai.SpringAiAgentLoop> springAiEngine;
+    private final String engineName;
     private final QueryRouter queryRouter;
     private final SymbolQueryService symbolQueryService;
     private final LlmClient llmClient;
@@ -59,10 +63,28 @@ public class AgentService {
     private final AnswerLogService answerLogService;
     private final SummaryAnswerer summaryAnswerer;
 
+    /**
+     * 兼容构造器：**给直接 new 的测试用**，默认走手写引擎（与前一个版本行为完全一致）。
+     *
+     * <p>这样这次引入 Spring AI 的改动对既有测试是"零改动"的 —— 分支要的是最小 diff，
+     * 而不是让 5 个测试文件跟着改构造参数。
+     */
     public AgentService(AnswerService answerService, AgentLoop agentLoop, QueryRouter queryRouter,
                         SymbolQueryService symbolQueryService, LlmClient llmClient,
                         AnswerCache answerCache, ReadCodeAiProperties properties,
                         AnswerLogService answerLogService, SummaryAnswerer summaryAnswerer) {
+        this(answerService, agentLoop, queryRouter, symbolQueryService, llmClient, answerCache, properties,
+                answerLogService, summaryAnswerer, null, "handwritten");
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public AgentService(AnswerService answerService, AgentLoop agentLoop, QueryRouter queryRouter,
+                        SymbolQueryService symbolQueryService, LlmClient llmClient,
+                        AnswerCache answerCache, ReadCodeAiProperties properties,
+                        AnswerLogService answerLogService, SummaryAnswerer summaryAnswerer,
+                        ObjectProvider<com.readcodeai.agent.springai.SpringAiAgentLoop> springAiEngine,
+                        @org.springframework.beans.factory.annotation.Value("${readcodeai.agent.engine:handwritten}")
+                        String engineName) {
         this.answerService = answerService;
         this.agentLoop = agentLoop;
         this.queryRouter = queryRouter;
@@ -72,6 +94,24 @@ public class AgentService {
         this.properties = properties;
         this.answerLogService = answerLogService;
         this.summaryAnswerer = summaryAnswerer;
+        this.springAiEngine = springAiEngine;
+        this.engineName = engineName;
+    }
+
+    /**
+     * 选哪个多跳引擎：默认手写版；`readcodeai.agent.engine=spring-ai` 时换 Spring AI 版。
+     *
+     * <p>两个引擎实现同一个 {@link AgentEngine}，返回同一种 {@link AgentAnswer} ——
+     * 所以下游（核验 / 缓存 / 记账 / 界面）一行都不用改。
+     *
+     * <p>注：这个属性没有收进 {@code ReadCodeAiProperties}，因为它是分支上的实验实现；
+     * 若验证通过要合进主干，应当按项目惯例收进去并加校验。
+     */
+    private AgentEngine engine() {
+        if (!"spring-ai".equalsIgnoreCase(engineName)) {
+            return agentLoop;
+        }
+        return springAiEngine.getObject();
     }
 
     public AgentAnswer ask(Long repoId, String question, AgentMode mode, String scopePath, Integer topK) {
@@ -143,7 +183,7 @@ public class AgentService {
                     + "定位 / 调用关系 / 实现类 / 全文检索等确定性能力不受影响");
         }
         // scopePath / topK 是多跳里用不上的旋钮：检索范围由模型自己决定，手动限定反而会把它框死
-        AgentAnswer answer = agentLoop.run(effectiveRepoId, repoRoot, question, seedObservations(routed),
+        AgentAnswer answer = engine().run(effectiveRepoId, repoRoot, question, seedObservations(routed),
                 deep ? BudgetGuard.deepOf(properties) : BudgetGuard.of(properties));
         putIfCacheable(effectiveRepoId, repo, question, effectiveMode, answer);
         answerLogService.recordAgent(effectiveRepoId, AnswerLogSource.USER, question, "MULTI_HOP",

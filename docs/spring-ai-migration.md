@@ -2,8 +2,9 @@
 
 > **这是一次"最小迁移"的实验记录**：只把**多跳引擎**换成 Spring AI 实现，其余（解析 / 索引 / 检索 /
 > 三层核验 / 评估 / 中间件 / REST / 前端）**一行都没动** —— 框架碰不到它们。
-> **默认引擎已切换为 Spring AI**（`readcodeai.agent.engine`，默认 `spring-ai`）；
-> 手写版保留为可切换的退路与 A/B 对照（两者共用同一个 `AgentEngine` 契约）。
+> **默认引擎 = Spring AI，且是唯一实现**：手写版在 2026-09-26 后续的两步里先搬家（9 条循环行为用例
+> 逐条平移到框架路径）再**物理删除** —— 见文末「手写引擎退役」两节与 `docs/verification-log.md`。
+> 「可切换的退路」这个说法**已过时**，按下文的历史阶段阅读时请注意。
 
 ## 第二步：切默认 + 实测（2026-09-26 完成）
 
@@ -12,7 +13,9 @@
 1. **引擎进答案缓存的键**（`AnswerCache.get/put` 多一维 `engine`）——两个引擎共存时，
    不带这一维就会出现"用 A 引擎问过、换 B 引擎直接拿到 A 的答案"，与当年"键漏了模型名"是同一类漏洞。
    已加回归断言：`AgentAnswerCacheTest` 里"换引擎 → 键必须变"。
-2. **属性收进 `ReadCodeAiProperties`**（`readcodeai.agent.engine`，枚举 `Engine`，非法值启动即报错）。
+2. ~~**属性收进 `ReadCodeAiProperties`**（`readcodeai.agent.engine`，枚举 `Engine`，非法值启动即报错）~~
+   —— **已随手写版一起退役**（引擎只剩一个，这个开关没有意义了；引擎标识改由 `AgentEngine.id()` 提供，
+   仍进答案缓存的键）。
 3. **可用性判断下沉到引擎**（`AgentEngine.available()` / `unavailableReason()`）——
    这是写离线覆盖测试时真撞出来的：两个引擎依赖不同（手写版要 `readcodeai.llm.*`，
    Spring AI 版要 `spring.ai.openai.*` 的模型 Bean），调用方自己判断会把"另一个引擎能用"误判成"都不能用"。
@@ -57,7 +60,8 @@ mvn -B -o test -Dtest=MultiHopLiveTest -Dreadcodeai.verify.repo=C:/Users/HUA/.re
 
 ### 已知遗留（合并前值得再看一眼）
 
-1. `AgentService` 仍保留一个**给测试用的兼容构造器**（9 参），固定走手写引擎；
+1. ~~`AgentService` 仍保留一个**给测试用的兼容构造器**（9 参），固定走手写引擎~~
+   —— ✅ **已删**（手写版退役时一并去掉，`AgentService` 现在只有一个构造器，注入 `AgentEngine`）；
 2. 原生工具调用协议**没有 `thought` 字段**，轨迹里的"推理"退化成模型调工具前顺带输出的一句话
    （已在系统提示词里明确要求它先说一句，但**不能像手写版那样强制**）；
 3. 框架的中止语义只到"工具调用次数"，四维里其余三维的原因由 `BudgetToolCallingManager` 自己记；
@@ -78,10 +82,10 @@ mvn -B -o test -Dtest=MultiHopLiveTest -Dreadcodeai.verify.repo=C:/Users/HUA/.re
 后面的空格）。
 
 > **为什么砍掉"手写"**：口径已定 —— **引入 Spring AI 就是为了替换掉手写引擎**。
-> 手写版**没有废弃**（`readcodeai.agent.engine=handwritten` 一键切回，也是 A/B 对照），
-> 但它从此只做**面试追问时的深度弹药**（"我先手写过一轮，所以知道框架省了哪 819 行、
-> 四维预算/环检测/证据核验四条一条没省"），不再是简历上的一行。
-> 早先的"方案 B（手写与框架两张牌都留）"**作废**。
+> ⭐ **2026-09-26 后续口径（最终）**：**手写版一概不体现** —— 简历不写、**面试话术里也不出现**；
+> 代码侧已物理删除（见文末两节）。对外只讲现在这套："**循环由 Spring AI 驱动，四类约束做在框架的扩展点上**"。
+> 早先的"方案 B（两张牌都留）"与"降为追问弹药"两个说法**都已作废**；
+> 万一被问到 git 历史里的旧实现，一句话带过（"最早循环是自己实现的，换 Spring AI 时把旧的删掉了"）。
 
 **技术栈药丸**：加 `Spring AI`，**撤掉 `Vue`**（投后端 / Agent 岗时它最不值钱，MediaVault 已佐证）；
 `LLM接入` **保留** —— 它是唯一带 "LLM" 字面词的药丸：

@@ -813,7 +813,7 @@ gson 上问 TypeToken 的泛型处理时，模型拒答并给了**具体原因**
 
 | 组件 | 做什么 |
 |---|---|
-| `AgentLoop` | **手写的 tool-calling 循环**：模型每轮输出一个 JSON —— 调工具或给结论；我们执行工具、把结果拼回上下文 |
+| `AgentLoop` | **手写的 tool-calling 循环**：模型每轮输出一个 JSON —— 调工具或给结论；我们执行工具、把结果拼回上下文（**这一版后来由 Spring AI 承接、手写实现已删**，见文末「手写引擎退役」两节） |
 | `ToolRegistry` + 6 个工具 | `findDefinition` / `findCallers` / `findCallees` / `findImplementations` / `readSymbol` / `textSearch` |
 | `SymbolResolver` | 名字 → 真实符号。**歧义时不猜**，把候选还回去让模型限定 |
 | `VisitedEdgeSet` | 环检测：同一条边不重复走（键 = 工具名 + 规范化参数） |
